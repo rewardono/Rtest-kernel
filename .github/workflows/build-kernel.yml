@@ -1,44 +1,34 @@
 name: Build Atlas Kernel (A135F)
 on:
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Free Disk Space
         uses: jlumbroso/free-disk-space@main
-
+      
       - name: Install Dependencies
         run: |
           sudo apt update
-          sudo apt install -y git-core flex bison build-essential libssl-dev clang llvm lld bc libelf-dev
-
+          sudo apt install -y git-core flex bison build-essential libssl-dev clang llvm lld bc libelf-dev ccache
+          # Also install cross-compilation tools
+          sudo apt install -y gcc-aarch64-linux-gnu
+      
       - name: Clone Source
         run: |
-          # Fresh clone ensures no leftover "File exists" errors
           git clone https://github.com/samsungexynos850/atlas kernel --depth=1
-
+      
       - name: Manual KernelSU Integration
         run: |
           cd kernel
-          # 1. Clean out any garbage from previous attempts
           rm -rf drivers/kernelsu
-          
-          # 2. Manually download the KernelSU source code
-          git clone https://github.com/tiann/KernelSU ksu_tmp
-          
-          # 3. Move the kernel directory to exactly where the error said it was missing
+          git clone https://github.com/tiann/KernelSU ksu_tmp --depth=1
           mv ksu_tmp/kernel drivers/kernelsu
-          
-          # 4. Force the link into the build system
-          # We use 'sed' to insert the line at line 1 of the file
           sed -i '1i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
           sed -i '1i obj-y += kernelsu/' drivers/Makefile
-          
-          # Clean up the temp folder
           rm -rf ksu_tmp
-
+      
       - name: Build Kernel
         run: |
           cd kernel
@@ -46,19 +36,24 @@ jobs:
           export LLVM=1
           export CROSS_COMPILE=aarch64-linux-gnu-
           
+          # Set PATH to include ccache if needed
+          export PATH="/usr/lib/ccache:$PATH"
+          
           mkdir -p out
-          # Load the Samsung configuration
           make O=out ARCH=arm64 exynos850_defconfig
           
           # Force enable KSU in the final config
-          scripts/config --file out/.config --enable KSU
-          # Disable module signing to prevent bootloops on OneUI ports
-          scripts/config --file out/.config --disable MODULE_SIG
+          ./scripts/config --file out/.config --enable KSU
+          # Disable module signing
+          ./scripts/config --file out/.config --disable MODULE_SIG
           
-          make O=out ARCH=arm64 -j$(nproc --all)
-
-      - name: Upload
+          # Build the kernel with verbose output
+          make O=out ARCH=arm64 -j$(nproc --all) 2>&1 | tee build.log
+      
+      - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: Atlas-A135F-Fixed
-          path: kernel/out/arch/arm64/boot/Image
+          name: Atlas-A135F-Kernel
+          path: |
+            kernel/out/arch/arm64/boot/Image
+            kernel/build.log
