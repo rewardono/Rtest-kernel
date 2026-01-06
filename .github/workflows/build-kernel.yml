@@ -12,12 +12,23 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y git-core flex bison build-essential libssl-dev clang llvm lld bc libelf-dev ccache
-          # Also install cross-compilation tools
           sudo apt install -y gcc-aarch64-linux-gnu
       
       - name: Clone Source
         run: |
           git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+      
+      - name: Explore Kernel Structure
+        run: |
+          cd kernel
+          echo "=== Listing configs in arch/arm64/configs/ ==="
+          ls -la arch/arm64/configs/ || echo "No arch/arm64/configs directory found"
+          echo ""
+          echo "=== Listing all config files ==="
+          find . -name "*defconfig" -type f | head -20
+          echo ""
+          echo "=== Checking Makefile for default config ==="
+          grep -r "defconfig" Makefile arch/arm64/Makefile 2>/dev/null || true
       
       - name: Manual KernelSU Integration
         run: |
@@ -35,17 +46,50 @@ jobs:
           export ARCH=arm64
           export LLVM=1
           export CROSS_COMPILE=aarch64-linux-gnu-
-          
-          # Set PATH to include ccache if needed
           export PATH="/usr/lib/ccache:$PATH"
           
           mkdir -p out
-          make O=out ARCH=arm64 exynos850_defconfig
+          
+          # Try to find and use the correct defconfig
+          # First, let's see what configs are available
+          CONFIGS=$(ls arch/arm64/configs/ 2>/dev/null || echo "")
+          echo "Available configs: $CONFIGS"
+          
+          # Try common Samsung Exynos 850 config names
+          if [ -f "arch/arm64/configs/exynos850_defconfig" ]; then
+            DEFCONFIG="exynos850_defconfig"
+          elif [ -f "arch/arm64/configs/exynos850_xxx_defconfig" ]; then
+            DEFCONFIG="exynos850_xxx_defconfig"
+          elif [ -f "arch/arm64/configs/atlas_defconfig" ]; then
+            DEFCONFIG="atlas_defconfig"
+          elif [ -f "arch/arm64/configs/sm4250_defconfig" ]; then
+            DEFCONFIG="sm4250_defconfig"  # Exynos 850 is also known as SM4250
+          else
+            # List all available configs and use the first one
+            ALL_CONFIGS=($(ls arch/arm64/configs/*_defconfig 2>/dev/null || ls arch/arm64/configs/*defconfig 2>/dev/null))
+            if [ ${#ALL_CONFIGS[@]} -gt 0 ]; then
+              DEFCONFIG=$(basename ${ALL_CONFIGS[0]})
+            else
+              echo "ERROR: No defconfig found!"
+              exit 1
+            fi
+          fi
+          
+          echo "Using defconfig: $DEFCONFIG"
+          
+          # Load the defconfig
+          make O=out ARCH=arm64 $DEFCONFIG
           
           # Force enable KSU in the final config
-          ./scripts/config --file out/.config --enable KSU
-          # Disable module signing
-          ./scripts/config --file out/.config --disable MODULE_SIG
+          if [ -f "./scripts/config" ]; then
+            ./scripts/config --file out/.config --enable KSU
+            ./scripts/config --file out/.config --disable MODULE_SIG
+          else
+            # If scripts/config doesn't exist, we need to edit .config manually
+            sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config
+            sed -i 's/CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out/.config
+            sed -i 's/CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out/.config
+          fi
           
           # Build the kernel with verbose output
           make O=out ARCH=arm64 -j$(nproc --all) 2>&1 | tee build.log
