@@ -1,4 +1,4 @@
-name: Build GKI Kernel for A135F - FINAL WORKING
+name: Build GKI Kernel for A135F - ULTIMATE
 on:
   workflow_dispatch:
 jobs:
@@ -7,7 +7,7 @@ jobs:
     timeout-minutes: 60
     
     steps:
-      - name: Install Everything Needed
+      - name: Install Dependencies
         run: |
           sudo apt update
           sudo apt install -y \
@@ -18,140 +18,175 @@ jobs:
             libssl-dev \
             libelf-dev \
             git \
-            wget \
-            unzip \
             gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu \
-            ccache  # <- ACTUALLY INSTALL IT!
+            g++-aarch64-linux-gnu
+          # DON'T install ccache to avoid issues
       
-      - name: Create Fake Cache Command
-        run: |
-          # Create a simple bash script that does nothing
-          echo '#!/bin/bash' > /tmp/cache
-          echo '# Fake cache command that just passes arguments through' >> /tmp/cache
-          echo 'shift' >> /tmp/cache  # Remove the first argument (cache)
-          echo 'exec "$@"' >> /tmp/cache  # Execute the rest
-          chmod +x /tmp/cache
-          
-          # Add it to PATH so it gets found first
-          export PATH="/tmp:$PATH"
-          
-          # Verify
-          which cache
-          cache --version 2>&1 || echo "Cache command created (fake)"
-      
-      - name: Get Kernel Source
+      - name: Get Clean Kernel Source
         run: |
           rm -rf kernel
           git clone https://github.com/samsungexynos850/atlas kernel --depth=1
       
-      - name: Add KernelSU (Simple Method)
+      - name: Add KernelSU (Minimal)
         run: |
           cd kernel
           rm -rf drivers/kernelsu
-          
-          # Use curl instead of wget
-          curl -L https://github.com/tiann/KernelSU/archive/main.tar.gz -o ksu.tar.gz
-          tar -xzf ksu.tar.gz
-          mv KernelSU-main/kernel drivers/kernelsu
-          
+          git clone https://github.com/tiann/KernelSU --depth=1 --single-branch --branch main ksu_tmp
+          mv ksu_tmp/kernel drivers/kernelsu
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           echo 'obj-y += kernelsu/' >> drivers/Makefile
-          
-          rm -rf KernelSU-main ksu.tar.gz
+          rm -rf ksu_tmp
       
-      - name: Fix All Issues
+      - name: Apply Only Necessary Fixes
         run: |
           cd kernel
           
-          # 1. Fix the unused variable
-          sed -i '49s/const char \*sys_state/const char __maybe_unused \*sys_state/' kernel/power/process.c
+          # 1. Fix the unused variable (THIS IS THE MAIN ISSUE)
+          sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c
           
-          # 2. Patch the Makefile to remove cache references
-          sed -i 's/^[[:space:]]*cache[[:space:]]*//g' Makefile
-          sed -i 's/"cache"/"ccache"/g' Makefile 2>/dev/null || true
+          # 2. Remove problematic flags from Makefile
+          # Find and remove the problematic flag
+          sed -i 's/-Wno-error-implicit-function-declaration//g' Makefile
           
-          # 3. Disable Werror
-          sed -i 's/-Werror/-Wno-error/g' Makefile
-          sed -i 's/WERROR.*=.*1/WERROR = 0/g' Makefile
+          # 3. Instead of disabling all warnings, just remove the specific ones causing errors
+          # Look for where this flag is set
+          grep -r "implicit-function-declaration" . || true
           
-          echo "All fixes applied!"
+          echo "Fixes applied. Checking Makefile for problematic flags..."
+          grep -n "Wno-error" Makefile || echo "No Wno-error flags found"
       
-      - name: Build The Kernel
+      - name: Build with Clean Environment
         run: |
           cd kernel
           
-          # Clean
-          rm -rf out
+          # Clean everything
+          make distclean 2>/dev/null || true
           rm -f .config
           
-          # Set environment
+          # Simple environment - NO ccache, NO complex flags
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           
-          # DISABLE ccache completely
-          unset CCACHE_DISABLE
-          unset USE_CCACHE
-          export CCACHE_DISABLE=1
+          # Make sure cache/ccache is not in PATH
+          export PATH=$(echo "$PATH" | sed 's|:/usr/lib/ccache||g')
           
-          # Configure
-          echo "Configuring with gki_defconfig..."
+          echo "Configuring kernel..."
+          # Use default gki_defconfig
           make gki_defconfig
           
-          # Enable KSU
+          # Enable KSU - don't touch anything else
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           
-          # Build with fake cache command in PATH
-          export PATH="/tmp:$PATH"
-          echo "Building kernel..."
+          # Save the config
+          cp .config .config.original
           
-          # Build with 2 threads to avoid memory issues
+          echo "Starting build..."
+          # Build with 2 cores to avoid memory issues and see errors clearly
           make -j2 2>&1 | tee build.log
           
-          # Check if successful
+          # Check result
           if [ -f "arch/arm64/boot/Image" ]; then
             echo "✅ SUCCESS! Kernel built!"
-            ls -lh arch/arm64/boot/Image
+            echo "File: arch/arm64/boot/Image"
             echo "Size: $(du -h arch/arm64/boot/Image | cut -f1)"
           else
             echo "❌ Build failed"
-            echo "=== Last 50 lines of build log ==="
-            tail -50 build.log
-            echo "=== Looking for errors ==="
-            grep -i "error\|fail" build.log | tail -20
+            echo "=== Checking for specific error ==="
+            
+            # Look for the exact error
+            if grep -q "unrecognized command-line option" build.log; then
+              echo "Found unrecognized flag error:"
+              grep -B2 -A2 "unrecognized command-line option" build.log
+              
+              # Try to find and remove the problematic flag
+              echo "=== Trying to remove problematic flags ==="
+              PROBLEMATIC_FLAG=$(grep "unrecognized command-line option" build.log | head -1 | sed "s/.*'\(.*\)'.*/\1/")
+              echo "Problematic flag: $PROBLEMATIC_FLAG"
+              
+              # Remove it from Makefile
+              sed -i "s/$PROBLEMATIC_FLAG//g" Makefile
+              
+              echo "Retrying build after removing flag..."
+              make clean
+              make -j1 2>&1 | tail -50
+            else
+              echo "=== Last 50 lines of build log ==="
+              tail -50 build.log
+            fi
             exit 1
           fi
       
-      - name: Create Simple Package
+      - name: Alternative - Try Different GCC Version
+        if: failure()
         run: |
           cd kernel
-          mkdir -p artifacts
           
-          # Copy kernel
+          # Try with a different approach - use GCC without any custom flags
+          make distclean
+          
+          # Install newer GCC if available
+          sudo apt install -y gcc-10-aarch64-linux-gnu g++-10-aarch64-linux-gnu || true
+          
+          # Try with GCC 10 if available
+          if which aarch64-linux-gnu-gcc-10 >/dev/null; then
+            export CROSS_COMPILE=aarch64-linux-gnu-gcc-10-
+          else
+            export CROSS_COMPILE=aarch64-linux-gnu-
+          fi
+          
+          export ARCH=arm64
+          
+          make gki_defconfig
+          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
+          sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
+          
+          # Build with bare minimum
+          make olddefconfig
+          make -j1 2>&1 | tail -100
+      
+      - name: Prepare Artifacts
+        if: success()
+        run: |
+          cd kernel
+          
+          echo "=== Build Successful ==="
+          mkdir -p artifacts
           cp arch/arm64/boot/Image artifacts/
           
-          # Create info file
-          echo "Kernel built for Samsung A135F (GKI)" > artifacts/INFO.txt
-          echo "Date: $(date)" >> artifacts/INFO.txt
-          echo "Size: $(du -h arch/arm64/boot/Image | cut -f1)" >> artifacts/INFO.txt
-          echo "KernelSU: Enabled" >> artifacts/INFO.txt
-          echo "Config: gki_defconfig" >> artifacts/INFO.txt
+          # Create a simple info file
+          cat > artifacts/INFO.md << 'EOF'
+          # GKI Kernel for Samsung A135F
           
-          # List files
+          - Device: Samsung Galaxy A135F
+          - Chipset: Exynos 850
+          - Type: GKI (Generic Kernel Image)
+          - Features: KernelSU enabled
+          - Build date: $(date)
+          
+          ## How to flash:
+          
+          1. **Using AnyKernel3:**
+             - Download AnyKernel3 template
+             - Replace Image in the zip
+             - Flash via custom recovery
+          
+          2. **Manual method:**
+             - Extract boot.img from stock firmware
+             - Replace kernel with this Image using Android Image Kitchen
+             - Repack and flash with Odin
+          
+          ## Notes:
+          - This is a GKI kernel for a non-GKI device
+          - Backup your current kernel first!
+          EOF
+          
           echo "Artifacts ready:"
           ls -lh artifacts/
       
       - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: A135F-Kernel
+          name: A135F-GKI-Kernel-FINAL
           path: kernel/artifacts/
           retention-days: 7
-      
-      - name: Upload Build Log
-        uses: actions/upload-artifact@v4
-        with:
-          name: Build-Log
-          path: kernel/build.log
-          retention-days: 3
