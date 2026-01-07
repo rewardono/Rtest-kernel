@@ -1,10 +1,10 @@
-name: Build GKI Kernel for A135F - Final Attempt
+name: Build GKI Kernel for A135F - FINAL
 on:
   workflow_dispatch:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 90
     
     steps:
       - name: Install Dependencies
@@ -20,18 +20,19 @@ jobs:
             git \
             wget \
             unzip \
-            python3 \
-            python3-pip \
             gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu \
-            clang-14 \
-            llvm-14 \
-            lld-14 \
-            libncurses-dev
+            g++-aarch64-linux-gnu
+      
+      - name: Fix ccache typo PERMANENTLY
+        run: |
+          # Create a bash script that redirects 'cache' to 'ccache'
+          echo '#!/bin/bash' | sudo tee /usr/local/bin/cache
+          echo 'exec /usr/bin/ccache "$@"' | sudo tee -a /usr/local/bin/cache
+          sudo chmod +x /usr/local/bin/cache
           
-          # Set clang-14 as default
-          sudo update-alternatives --install /usr/bin/clang clang /usr/bin/clang-14 100
-          sudo update-alternatives --install /usr/bin/ld.lld ld.lld /usr/bin/ld.lld-14 100
+          # Verify it works
+          which cache
+          cache --version
       
       - name: Get Kernel Source
         run: |
@@ -49,65 +50,45 @@ jobs:
           echo 'obj-y += kernelsu/' >> drivers/Makefile
           rm -rf KernelSU-main ksu.zip
       
-      - name: Apply Critical Fixes
+      - name: Apply ALL Critical Fixes
         run: |
           cd kernel
           
-          # 1. Fix the unused variable warning
-          sed -i 's/const char \*sys_state\[SYSTEM_END\]/const char __maybe_unused \*sys_state\[SYSTEM_END\]/' kernel/power/process.c
+          # 1. Fix the unused variable warning in process.c
+          sed -i '49s/const char \*sys_state\[SYSTEM_END\]/const char __maybe_unused \*sys_state\[SYSTEM_END\]/' kernel/power/process.c
           
-          # 2. Disable Werror in the main Makefile
-          sed -i 's/-Werror/-Wno-error/g' Makefile
-          sed -i 's/WERROR := 1/WERROR := 0/' Makefile
-          sed -i 's/WERROR ?= 1/WERROR ?= 0/' Makefile
+          # 2. Directly patch the Makefile to fix the cache typo
+          sed -i 's/ cache / ccache /g' Makefile
+          sed -i 's/"cache"/"ccache"/g' Makefile
+          sed -i 's/$(cache)/$(ccache)/g' Makefile
           
-          # 3. Also check for Werror in scripts/ and subdirectories
-          find . -name "Makefile*" -type f -exec grep -l "WERROR" {} \; | xargs sed -i 's/WERROR.*=.*1/WERROR = 0/g' 2>/dev/null || true
+          # 3. Also check scripts/Makefile.host
+          if [ -f "scripts/Makefile.host" ]; then
+            sed -i 's/ cache / ccache /g' scripts/Makefile.host
+            sed -i 's/"cache"/"ccache"/g' scripts/Makefile.host
+          fi
           
-          # 4. Patch common compilation issues
-          echo "Applying additional patches..."
+          # 4. Disable Werror completely
+          find . -name "Makefile*" -type f -exec sed -i 's/-Werror//g' {} \; 2>/dev/null || true
+          find . -name "Kbuild*" -type f -exec sed -i 's/-Werror//g' {} \; 2>/dev/null || true
           
-          # Create a patch file for common issues
-          cat > fix_compilation.patch << 'EOF'
-          --- a/Makefile
-          +++ b/Makefile
-          @@ -455,7 +455,7 @@
-           # Use make M=dir to specify directory of external module to build
-           # Old syntax make ... SUBDIRS=$PWD is still supported
-           # Setting the environment variable KBUILD_EXTMOD take precedence
-          -ifdef SUBDIRS
-          +ifneq ($(SUBDIRS),)
-            KBUILD_EXTMOD ?= $(SUBDIRS)
-           endif
-           
-          EOF
-          
-          # Apply if patch can be applied
-          patch -p1 -N -r - < fix_compilation.patch 2>/dev/null || true
+          echo "All fixes applied!"
       
-      - name: Build with CLANG and Aggressive Flags
+      - name: Build Kernel - SIMPLE APPROACH
         run: |
           cd kernel
           
           # Clean everything
           make distclean 2>/dev/null || true
-          rm -rf out .config
+          rm -f .config
           
-          # Set environment for CLANG build
+          # SIMPLE environment - no ccache, no complex flags
           export ARCH=arm64
-          export LLVM=1
-          export LLVM_IAS=1
-          export CLANG_TRIPLE=aarch64-linux-gnu-
           export CROSS_COMPILE=aarch64-linux-gnu-
           
-          # Use newer CLANG if available
-          export CC=clang
-          export LD=ld.lld
-          export AR=llvm-ar
-          export NM=llvm-nm
-          export OBJCOPY=llvm-objcopy
-          export OBJDUMP=llvm-objdump
-          export STRIP=llvm-strip
+          # DISABLE ccache completely
+          unset CCACHE
+          unset USE_CCACHE
           
           # Configure
           echo "Configuring kernel..."
@@ -117,144 +98,102 @@ jobs:
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           
-          # Disable module signing completely
-          echo "# CONFIG_MODULE_SIG is not set" >> .config
-          echo "# CONFIG_MODULE_SIG_FORCE is not set" >> .config
-          echo "# CONFIG_MODULE_SIG_ALL is not set" >> .config
+          # Save config
+          cp .config config_final
           
-          # Save config for debugging
-          cp .config config_before_build
+          # Build with verbose output
+          echo "Building kernel... (this will take 5-10 minutes)"
+          time make -j$(nproc) 2>&1 | tee build.log
           
-          # Build with aggressive warning suppression
-          echo "Starting build with CLANG (this will take a while)..."
-          
-          # Build with specific flags to suppress warnings
-          make \
-            KCFLAGS="-Wno-unused-variable -Wno-unused-function -Wno-unused-label -Wno-unused-parameter -Wno-unused-result -Wno-sign-compare -Wno-format -Wno-maybe-uninitialized -Wno-pointer-sign -Wno-array-bounds -Wno-stringop-overflow" \
-            -j$(nproc) 2>&1 | tee full_build.log
-          
-          # Check for the kernel image
+          # Check result
           if [ -f "arch/arm64/boot/Image" ]; then
-            echo "✓ Build successful!"
-            cp arch/arm64/boot/Image kernel-Image
-            # Also check for compressed version
-            if [ -f "arch/arm64/boot/Image.gz" ]; then
-              cp arch/arm64/boot/Image.gz kernel-Image.gz
-            fi
+            echo "✓ BUILD SUCCESSFUL!"
+            echo "Kernel size: $(du -h arch/arm64/boot/Image | cut -f1)"
           else
             echo "✗ Build failed"
-            echo "=== Checking for errors ==="
-            
-            # Look for the actual error
-            grep -A5 -B5 "error:" full_build.log | tail -50 || true
-            grep -i "fail" full_build.log | tail -20 || true
-            
-            # Try to build with make -j1 for better error visibility
-            echo "=== Trying with single thread for better error output ==="
-            make -j1 2>&1 | tail -100
+            echo "=== Last 100 lines of build log ==="
+            tail -100 build.log
+            echo "=== Looking for specific error ==="
+            grep -i "error\|fail" build.log | tail -20
             exit 1
           fi
       
-      - name: Last Resort - Try Different Approach
-        if: failure()
+      - name: Create Flashable Package
         run: |
-          echo "Trying alternative build method..."
           cd kernel
           
-          # Try building without KernelSU first
-          make distclean 2>/dev/null || true
-          
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          
-          # Build without KSU first
-          make gki_defconfig
-          
-          # Build vanilla kernel
-          echo "Building vanilla GKI kernel..."
-          if make -j2 2>&1 | tee vanilla_build.log; then
-            echo "Vanilla build successful! Now adding KernelSU..."
+          if [ -f "arch/arm64/boot/Image" ]; then
+            echo "Creating flashable package..."
             
-            # Clean and add KernelSU
-            make clean
-            rm -rf drivers/kernelsu
-            wget -q https://github.com/tiann/KernelSU/archive/refs/heads/main.zip -O ksu.zip
-            unzip -q ksu.zip
-            mv KernelSU-main/kernel drivers/kernelsu
-            echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-            echo 'obj-y += kernelsu/' >> drivers/Makefile
-            rm -rf KernelSU-main ksu.zip
+            # Create AnyKernel3 structure
+            mkdir -p anykernel
+            cp arch/arm64/boot/Image anykernel/
             
-            # Rebuild with KSU
-            make gki_defconfig
-            sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
-            sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
+            # Create anykernel script
+            cat > anykernel/anykernel.sh << 'EOF'
+            #!/system/bin/sh
+            # AnyKernel3 Ramdisk Mod Script
+            # osm0sis @ xda-developers
             
-            if make -j2; then
-              echo "✓ Kernel with KSU built successfully!"
-              cp arch/arm64/boot/Image kernel-Image
-            else
-              echo "Failed to build with KSU"
-              exit 1
-            fi
-          else
-            echo "Vanilla build also failed"
-            tail -100 vanilla_build.log
-            exit 1
+            ## AnyKernel setup
+            # begin properties
+            properties() {
+              kernel.string=GKI Kernel for A135F
+              do.devicecheck=1
+              do.modules=0
+              do.systemless=1
+              do.cleanup=1
+              do.cleanuponabort=0
+              device.name1=a13
+              device.name2=a135f
+              device.name3=a13x
+            }
+            
+            ## AnyKernel file attributes
+            # set permissions/ownership for included ramdisk files
+            # set_perm_recursive 0 0 0755 0644;
+            # set_perm_recursive 0 0 0755 0755;
+            
+            ## AnyKernel install
+            dump_boot;
+            
+            # begin ramdisk changes
+            
+            # end ramdisk changes
+            
+            write_boot;
+            ## end install
+            EOF
+            
+            chmod +x anykernel/anykernel.sh
+            
+            # Create flashable zip
+            cd anykernel
+            zip -r9 ../A135F-GKI-Kernel.zip *
+            
+            echo "Flashable zip created!"
+            ls -lh ../A135F-GKI-Kernel.zip
           fi
       
-      - name: Prepare Final Artifacts
-        if: success()
-        run: |
-          cd kernel
-          
-          echo "=== Build Successful! ==="
-          echo "Kernel image details:"
-          ls -lh arch/arm64/boot/Image
-          file arch/arm64/boot/Image
-          
-          mkdir -p artifacts
-          cp arch/arm64/boot/Image artifacts/
-          
-          # Create a simple flash script
-          cat > artifacts/flash_instructions.txt << 'EOF'
-          === How to Flash This Kernel ===
-          
-          1. For Samsung devices (A135F):
-             - Extract boot.img from your firmware
-             - Use Android Image Kitchen (AIK) to unpack
-             - Replace kernel (Image) with this file
-             - Repack and flash with Odin
-          
-          2. Using AnyKernel3:
-             - Download AnyKernel3 template
-             - Replace the Image in the zip
-             - Flash via custom recovery
-          
-          3. Direct flash (if supported):
-             - Some recoveries allow flashing Image directly
-          
-          Note: Backup your current kernel first!
-          EOF
-          
-          # List all artifacts
-          echo "Artifacts prepared:"
-          ls -lh artifacts/
-      
-      - name: Upload Kernel Artifacts
+      - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
-          name: A135F-GKI-Kernel-Final
-          path: kernel/artifacts/
+          name: Kernel-Image
+          path: |
+            kernel/arch/arm64/boot/Image
+            kernel/config_final
           retention-days: 7
       
-      - name: Upload Build Logs
-        if: always()
+      - name: Upload Flashable Zip
         uses: actions/upload-artifact@v4
         with:
-          name: Build-Logs
-          path: |
-            kernel/full_build.log
-            kernel/vanilla_build.log
-            kernel/config_before_build
+          name: Flashable-Zip
+          path: kernel/A135F-GKI-Kernel.zip
+          retention-days: 7
+      
+      - name: Upload Build Log
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Log
+          path: kernel/build.log
           retention-days: 3
