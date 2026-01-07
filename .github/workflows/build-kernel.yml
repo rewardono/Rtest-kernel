@@ -1,4 +1,4 @@
-name: Build GKI Kernel for A135F - PROPER FIX
+name: Build GKI Kernel for A135F - FINAL FIX
 on:
   workflow_dispatch:
 jobs:
@@ -7,7 +7,7 @@ jobs:
     timeout-minutes: 120
     
     steps:
-      - name: Install Dependencies (No ccache)
+      - name: Install Dependencies
         run: |
           sudo apt update
           sudo apt install -y \
@@ -19,89 +19,49 @@ jobs:
             libelf-dev \
             git \
             gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu
-          # DO NOT install ccache
-      
-      - name: Create Fake Cache Wrapper
-        run: |
-          # Create a wrapper script that intercepts "cache" calls
-          # and passes them directly to the compiler
-          cat > /tmp/cache-wrapper.sh << 'EOF'
-          #!/bin/bash
-          # This wrapper intercepts calls to "cache" and passes them to the real compiler
-          
-          # Remove the first argument if it's "cache"
-          if [ "$1" = "cache" ]; then
-              shift
-          fi
-          
-          # Check if we're being called as a compiler wrapper
-          # If so, run the real compiler instead
-          if [ "$1" = "gcc" ] || [ "$1" = "g++" ] || [ "$1" = "aarch64-linux-gnu-gcc" ]; then
-              shift
-          fi
-          
-          # Call the real compiler
-          exec aarch64-linux-gnu-gcc "$@"
-          EOF
-          
-          chmod +x /tmp/cache-wrapper.sh
-          
-          # Also create a simple "cache" command that just runs gcc
-          echo '#!/bin/bash' | sudo tee /usr/local/bin/cache
-          echo 'exec aarch64-linux-gnu-gcc "$@"' | sudo tee -a /usr/local/bin/cache
-          sudo chmod +x /usr/local/bin/cache
-          
-          # Create gcc wrapper for host compiler
-          echo '#!/bin/bash' | sudo tee /usr/local/bin/cache-gcc
-          echo 'exec gcc "$@"' | sudo tee -a /usr/local/bin/cache-gcc
-          sudo chmod +x /usr/local/bin/cache-gcc
+            g++-aarch64-linux-gnu \
+            python3
       
       - name: Get Kernel Source
         run: |
           rm -rf kernel
           git clone https://github.com/samsungexynos850/atlas kernel --depth=1
       
-      - name: Patch Kernel Source Completely
+      - name: Fix All Compilation Issues
         run: |
           cd kernel
           
           # 1. Fix the unused variable
           sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c
           
-          # 2. COMPLETELY remove ccache/cache references from ALL Makefiles
-          echo "Removing all ccache/cache references..."
+          # 2. Fix the malformed =return-type flag
+          # Search for the pattern "=return-type" and fix it
+          echo "Searching for malformed compiler flags..."
+          grep -r "=return-type" . 2>/dev/null || echo "No =return-type found in grep"
           
-          # Main Makefile - replace cache with empty string
-          sed -i 's/^[[:space:]]*cache[[:space:]]*//g' Makefile
-          sed -i 's/[[:space:]]cache[[:space:]]/ /g' Makefile
-          sed -i 's/"cache"//g' Makefile
-          sed -i 's/$(cache)//g' Makefile
+          # Look in Makefiles for suspicious patterns
+          find . -name "Makefile*" -type f -exec grep -l "return-type" {} \; 2>/dev/null || true
           
-          # Remove CCACHE definition
-          sed -i '/^CCACHE/d' Makefile
-          sed -i '/^export CCACHE/d' Makefile
+          # Common fix: replace =return-type with -Wreturn-type
+          find . -type f -name "Makefile*" -exec sed -i 's/=return-type/-Wreturn-type/g' {} \; 2>/dev/null || true
+          find . -type f -name "Kbuild*" -exec sed -i 's/=return-type/-Wreturn-type/g' {} \; 2>/dev/null || true
+          find . -type f -name "*.mk" -exec sed -i 's/=return-type/-Wreturn-type/g' {} \; 2>/dev/null || true
           
-          # Patch scripts/Makefile.host
-          if [ -f "scripts/Makefile.host" ]; then
-            sed -i 's/^[[:space:]]*cache[[:space:]]*//g' scripts/Makefile.host
-            sed -i 's/[[:space:]]cache[[:space:]]/ /g' scripts/Makefile.host
-            sed -i 's/"cache"//g' scripts/Makefile.host
-          fi
+          # 3. Also fix other potential malformed flags
+          # The pattern =something suggests missing -W or -f
+          echo "Checking for other malformed flags..."
+          for flag in return-type missing-prototypes unused-but-set-variable; do
+            find . -type f \( -name "Makefile*" -o -name "Kbuild*" -o -name "*.mk" \) \
+              -exec sed -i "s/=$flag/-W$flag/g" {} \; 2>/dev/null || true
+          done
           
-          # Patch all other Makefiles
-          find . -name "Makefile*" -type f -exec sed -i 's/ cache / /g' {} \; 2>/dev/null || true
-          find . -name "Makefile*" -type f -exec sed -i 's/"cache"//g' {} \; 2>/dev/null || true
+          # 4. Check the main Makefile for compiler flag definitions
+          echo "Checking Makefile for KBUILD_CFLAGS..."
+          grep -n "KBUILD_CFLAGS\|KBUILD_CFLAGS_KERNEL" Makefile | head -20
           
-          # Remove problematic compiler flags
-          sed -i 's/-Wno-error-implicit-function-declaration//g' Makefile
-          sed -i 's/-Werror-implicit-function-declaration//g' Makefile
-          
-          # Disable Werror completely
-          sed -i 's/-Werror//g' Makefile
-          sed -i 's/WERROR.*=.*1/WERROR = 0/g' Makefile
-          
-          echo "Patching complete!"
+          # 5. Remove any problematic ccache/cache references
+          sed -i 's/ccache //g' Makefile 2>/dev/null || true
+          sed -i 's/cache //g' Makefile 2>/dev/null || true
       
       - name: Add KernelSU
         run: |
@@ -113,7 +73,7 @@ jobs:
           echo 'obj-y += kernelsu/' >> drivers/Makefile
           rm -rf ksu_tmp
       
-      - name: Build Kernel - NO CCACHE AT ALL
+      - name: Build Kernel with Debug Info
         run: |
           cd kernel
           
@@ -121,18 +81,14 @@ jobs:
           make distclean 2>/dev/null || true
           rm -f .config
           
-          # Set environment - EXPLICITLY disable ccache
+          # Set environment
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           
-          # Force disable ccache
+          # Disable ccache completely
           unset CCACHE_DISABLE
           unset USE_CCACHE
           export CCACHE_DISABLE=1
-          export USE_CCACHE=0
-          
-          # Add our wrapper to PATH temporarily
-          export PATH="/usr/local/bin:$PATH"
           
           echo "Configuring kernel..."
           make gki_defconfig
@@ -144,90 +100,153 @@ jobs:
           # Save config
           cp .config .config.patched
           
-          echo "Starting build (this will take 15-20 minutes)..."
+          echo "Building kernel with debug output..."
           
-          # Build with single core first to see errors clearly
-          make -j1 2>&1 | tee build_single.log
+          # Build with verbose output to see exact compiler commands
+          # First, build only the problematic target to see the exact command
+          echo "=== Testing kernel/bounds.s compilation ==="
+          make V=1 kernel/bounds.s 2>&1 | tee bounds_build.log
           
-          # Check if successful
-          if [ -f "arch/arm64/boot/Image" ]; then
-            echo "✅ Build successful with single core!"
-            # Now try with more cores
-            echo "Building with all cores..."
-            make -j$(nproc) 2>&1 | tee build_full.log
-          else
-            echo "⚠️ Single core build failed, checking errors..."
-            tail -100 build_single.log
-            echo "Trying alternative approach..."
+          if [ -f "kernel/bounds.s" ]; then
+            echo "✅ kernel/bounds.s built successfully!"
+            echo "Now building full kernel..."
             
-            # Try building without our PATH modification
-            export PATH=$(echo "$PATH" | sed 's|/usr/local/bin:||')
+            # Build the full kernel
+            make -j$(nproc) 2>&1 | tee full_build.log
+            
+            if [ -f "arch/arm64/boot/Image" ]; then
+              echo "🎉 Kernel build successful!"
+            else
+              echo "❌ Full build failed after bounds.s succeeded"
+              tail -100 full_build.log
+              exit 1
+            fi
+          else
+            echo "❌ Failed to build kernel/bounds.s"
+            echo "=== Looking for exact compiler command ==="
+            grep "aarch64-linux-gnu-gcc" bounds_build.log | head -5
+            
+            # Try to manually see what flags are being passed
+            echo "=== Checking compiler flags in Kbuild ==="
+            if [ -f "kernel/Kbuild" ]; then
+              grep -n "cflags" kernel/Kbuild || true
+            fi
+            
+            # Try alternative: build with minimal flags
+            echo "=== Trying with minimal CFLAGS ==="
             make clean
+            
+            # Export minimal CFLAGS
+            export KCFLAGS="-Wall -Werror"
+            
             make gki_defconfig
             sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
             sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
             
-            # Build directly with explicit compiler
-            make CC="aarch64-linux-gnu-gcc" HOSTCC="gcc" -j1 2>&1 | tee build_direct.log
+            # Try building bounds.s with explicit command
+            echo "Building bounds.s with explicit command..."
+            cd kernel
+            aarch64-linux-gnu-gcc -Wall -Werror -S -o bounds.s bounds.c 2>&1 || echo "Manual build failed"
+            cd ..
             
-            if [ -f "arch/arm64/boot/Image" ]; then
-              echo "✅ Build successful with direct compiler!"
-            else
-              echo "❌ All build attempts failed"
-              echo "=== Last errors from direct build ==="
-              tail -50 build_direct.log
-              exit 1
-            fi
+            # One more attempt: check the exact command from make
+            echo "=== Running make with extreme verbosity ==="
+            make V=2 kernel/bounds.s 2>&1 | grep -A2 -B2 "gcc" | head -20
+            
+            exit 1
           fi
+      
+      - name: Try Alternative Build Method
+        if: failure()
+        run: |
+          cd kernel
           
-          # Final verification
+          echo "Trying alternative build method..."
+          
+          # Clean
+          make distclean 2>/dev/null || true
+          
+          # Create a minimal .config manually
+          echo "Creating minimal .config..."
+          cat > .config << 'EOF'
+          # CONFIG_KSU is not set
+          CONFIG_MODULES=y
+          CONFIG_MODULE_UNLOAD=y
+          # CONFIG_MODULE_FORCE_UNLOAD is not set
+          CONFIG_MODVERSIONS=y
+          CONFIG_MODULE_SRCVERSION_ALL=y
+          # CONFIG_MODULE_SIG is not set
+          CONFIG_KALLSYMS=y
+          CONFIG_KALLSYMS_ALL=y
+          CONFIG_EMBEDDED=y
+          CONFIG_SLOB=y
+          EOF
+          
+          # Set architecture
+          export ARCH=arm64
+          
+          # Run olddefconfig to set defaults
+          make olddefconfig
+          
+          # Now enable KSU
+          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
+          
+          # Try building with different approach
+          echo "Building with alternative method..."
+          make -j1 2>&1 | tee alt_build.log
+          
           if [ -f "arch/arm64/boot/Image" ]; then
-            echo "🎉 KERNEL SUCCESSFULLY BUILT!"
+            echo "✅ Alternative build successful!"
+          else
+            echo "❌ Alternative build failed"
+            tail -100 alt_build.log
+            exit 1
+          fi
+      
+      - name: Prepare Artifacts
+        if: success()
+        run: |
+          cd kernel
+          
+          if [ -f "arch/arm64/boot/Image" ]; then
+            echo "🎉 SUCCESS! Kernel built!"
             echo "File: arch/arm64/boot/Image"
             echo "Size: $(du -h arch/arm64/boot/Image | cut -f1)"
-            file arch/arm64/boot/Image
+            
+            mkdir -p artifacts
+            cp arch/arm64/boot/Image artifacts/
+            
+            # Create a simple anykernel script
+            cat > artifacts/flash.sh << 'EOF'
+            #!/system/bin/sh
+            # Simple flash script
+            
+            echo "Flashing GKI kernel for A135F..."
+            echo "Make sure you have backup!"
+            
+            # Mount boot if needed
+            mount -o rw,remount / || true
+            
+            # Backup original kernel
+            if [ -f "/dev/block/platform/.../by-name/boot" ]; then
+              dd if=/dev/block/platform/.../by-name/boot of=/sdcard/boot_backup.img
+            fi
+            
+            echo "Replace this script with proper flashing logic"
+            echo "For now, manually flash using:"
+            echo "1. Android Image Kitchen to unpack boot.img"
+            echo "2. Replace kernel with this Image file"
+            echo "3. Repack and flash with Odin"
+            EOF
+            
+            chmod +x artifacts/flash.sh
+            
+            echo "Artifacts ready:"
+            ls -lh artifacts/
           else
             echo "❌ No kernel Image found"
             exit 1
           fi
-      
-      - name: Create Simple Package
-        run: |
-          cd kernel
-          
-          echo "Creating artifacts..."
-          mkdir -p artifacts
-          cp arch/arm64/boot/Image artifacts/
-          
-          # Create info file
-          cat > artifacts/README.md << 'EOF'
-          # GKI Kernel for Samsung A135F
-          
-          ## File: Image
-          - This is the raw kernel binary
-          - Built for Exynos 850 (Samsung A135F)
-          - GKI (Generic Kernel Image) version
-          - KernelSU enabled
-          
-          ## How to flash:
-          
-          1. **Extract boot.img** from your device's stock firmware
-          2. **Use Android Image Kitchen** (AIK) to unpack boot.img
-          3. **Replace** the kernel file with this Image
-          4. **Repack** boot.img
-          5. **Flash** with Odin (AP slot)
-          
-          OR
-          
-          1. Use **AnyKernel3** template
-          2. Replace Image in the zip
-          3. Flash via custom recovery (if available)
-          
-          ## Backup your current kernel first!
-          EOF
-          
-          echo "Artifacts ready:"
-          ls -lh artifacts/
       
       - name: Upload Kernel
         uses: actions/upload-artifact@v4
