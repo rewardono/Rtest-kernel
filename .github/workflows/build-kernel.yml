@@ -1,6 +1,6 @@
 name: Build GKI Kernel for Samsung A135F
 on:
-  workflow_dispatch:  # Allows manual triggering
+  workflow_dispatch:
 
 jobs:
   build:
@@ -20,13 +20,15 @@ jobs:
             libssl-dev \
             libelf-dev \
             git \
-            ccache \
             wget \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu
           
-          # Fix the cache typo in the kernel source
-          sudo ln -sf /usr/bin/ccache /usr/local/bin/cache
+          # Create fake cache command to bypass ccache issues
+          echo '#!/bin/bash' | sudo tee /usr/local/bin/cache
+          echo 'exec aarch64-linux-gnu-gcc "$@"' | sudo tee -a /usr/local/bin/cache
+          sudo chmod +x /usr/local/bin/cache
+          
           echo "✅ Dependencies installed"
       
       # Step 2: Get the kernel source
@@ -47,11 +49,14 @@ jobs:
           # Fix 2: Malformed compiler flags
           echo "Fixing malformed compiler flags..."
           find . -type f \( -name "Makefile*" -o -name "Kbuild*" \) -exec sed -i 's/-implicit-function-declaration/-Wimplicit-function-declaration/g' {} \; 2>/dev/null || true
-          find . -type f \( -name "Makefile*" -o -name "Kbuild*" \) -exec sed -i 's/=return-type/-Wreturn-type/g' {} \; 2>/dev/null || true
           
           # Fix 3: Remove problematic Werror flags
-          sed -i 's/-Werror-implicit-function-declaration//g' Makefile
-          sed -i 's/WERROR.*=.*1/WERROR = 0/g' Makefile
+          sed -i 's/-Werror-implicit-function-declaration//g' Makefile 2>/dev/null || true
+          sed -i 's/WERROR.*=.*1/WERROR = 0/g' Makefile 2>/dev/null || true
+          
+          # Fix 4: Remove ccache references
+          sed -i 's/ccache //g' Makefile 2>/dev/null || true
+          sed -i 's/cache //g' Makefile 2>/dev/null || true
           
           echo "✅ All fixes applied"
       
@@ -78,14 +83,19 @@ jobs:
           
           # Clean any previous builds
           make distclean 2>/dev/null || true
-          rm -f .config
+          rm -f .config .config.old
           
           # Set environment
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           
-          # Configure for GKI
+          # Configure for GKI (non-interactive)
+          echo "Running gki_defconfig..."
           make gki_defconfig
+          
+          # Run olddefconfig to accept all defaults non-interactively
+          echo "Running olddefconfig to set all defaults..."
+          make olddefconfig
           
           # Enable KernelSU
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
@@ -94,8 +104,12 @@ jobs:
           # Disable module signing to prevent bootloops
           echo "# CONFIG_MODULE_SIG is not set" >> .config
           echo "# CONFIG_MODULE_SIG_FORCE is not set" >> .config
+          echo "# CONFIG_MODULE_SIG_ALL is not set" >> .config
           
-          echo "✅ Kernel configured"
+          # Run olddefconfig again to resolve any new dependencies
+          make olddefconfig
+          
+          echo "✅ Kernel configured (non-interactive)"
           cp .config .config.before_build
       
       # Step 6: Build the kernel
@@ -103,7 +117,12 @@ jobs:
         run: |
           cd kernel
           
+          # Set environment
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          
           echo "🚀 Building kernel... This will take 10-20 minutes"
+          echo "Using $(nproc) cores..."
           
           # Build with all available cores
           make -j$(nproc) 2>&1 | tee build.log
@@ -114,15 +133,42 @@ jobs:
             echo "Kernel size: $(du -h arch/arm64/boot/Image | cut -f1)"
           else
             echo "❌ Build failed"
-            echo "=== Last 50 lines of build log ==="
-            tail -50 build.log
-            exit 1
+            echo "=== Checking for specific errors ==="
+            
+            # Check for common errors
+            if grep -q "non-retpoline compiler" build.log; then
+              echo "ERROR: Non-retpoline compiler issue detected"
+              echo "This is an x86 warning but we're building ARM64 - ignoring"
+              
+              # Try building with KCFLAGS to suppress the warning
+              echo "Trying build with KCFLAGS override..."
+              make clean
+              export KCFLAGS="-Wno-error"
+              make -j$(nproc) 2>&1 | tee build2.log
+              
+              if [ -f "arch/arm64/boot/Image" ]; then
+                echo "✅ Build successful with KCFLAGS override!"
+              else
+                echo "❌ Still failed with KCFLAGS override"
+                tail -100 build2.log
+                exit 1
+              fi
+            else
+              echo "=== Last 50 lines of build log ==="
+              tail -50 build.log
+              exit 1
+            fi
           fi
       
       # Step 7: Create flashable package
       - name: Create Flashable Package
         run: |
           cd kernel
+          
+          if [ ! -f "arch/arm64/boot/Image" ]; then
+            echo "❌ No kernel Image found, skipping package creation"
+            exit 1
+          fi
           
           echo "📦 Creating flashable package..."
           
