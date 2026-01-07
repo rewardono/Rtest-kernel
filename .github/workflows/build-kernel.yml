@@ -3,19 +3,19 @@ on:
   workflow_dispatch:
     inputs:
       clean_build:
-        description: 'Clean build (takes longer)'
+        description: 'Clean build'
         required: false
         default: 'false'
 jobs:
   build:
-    runs-on: ubuntu-22.04  # Use specific version instead of latest
-    timeout-minutes: 60  # Timeout after 60 minutes
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
       
-      - name: Install Dependencies (Minimum)
+      - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -27,50 +27,108 @@ jobs:
             libelf-dev \
             git \
             gcc-aarch64-linux-gnu
-          # Clean apt cache to save space
           sudo apt-get clean
           sudo rm -rf /var/lib/apt/lists/*
       
-      - name: Clone Kernel Source (Shallow)
+      - name: Clone Kernel Source
         run: |
           git clone --depth=1 --single-branch \
             https://github.com/samsungexynos850/atlas kernel
       
-      - name: Add KernelSU (Minimal)
+      - name: Add KernelSU
         run: |
           cd kernel
+          # Clean up any existing kernelsu (file or directory)
+          rm -rf drivers/kernelsu
+          rm -f drivers/kernelsu
+          
+          # Clone KernelSU
           git clone --depth=1 https://github.com/tiann/KernelSU ksu_tmp
-          mv ksu_tmp/kernel drivers/kernelsu
+          
+          # Check what we got
+          echo "=== KernelSU structure ==="
+          ls -la ksu_tmp/ || echo "No ksu_tmp directory"
+          
+          # Move kernel directory to drivers
+          if [ -d "ksu_tmp/kernel" ]; then
+            mv ksu_tmp/kernel drivers/kernelsu
+          else
+            echo "ERROR: ksu_tmp/kernel not found!"
+            echo "Trying alternative location..."
+            # Some KernelSU versions have different structure
+            find ksu_tmp -type f -name "Kconfig" | head -5
+            exit 1
+          fi
+          
+          # Add to Kconfig and Makefile
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           echo 'obj-y += kernelsu/' >> drivers/Makefile
+          
+          # Clean up
           rm -rf ksu_tmp
+          
+          echo "=== Verification ==="
+          ls -la drivers/kernelsu/ || echo "Failed to setup KernelSU"
       
       - name: Build Kernel
         run: |
           cd kernel
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
-          
-          # Disable ccache to save space
           export USE_CCACHE=0
           
           mkdir -p out
           
-          # Build with minimal output
           echo "Configuring kernel..."
-          make O=out ARCH=arm64 gki_defconfig > /dev/null 2>&1
+          # First check if defconfig exists
+          if [ ! -f "arch/arm64/configs/gki_defconfig" ]; then
+            echo "ERROR: gki_defconfig not found!"
+            echo "Available configs in arch/arm64/configs/:"
+            ls arch/arm64/configs/ || echo "No configs directory"
+            exit 1
+          fi
           
-          # Enable KSU
+          make O=out ARCH=arm64 gki_defconfig
+          
+          # Enable KernelSU and modules
+          echo "Modifying config for KSU..."
+          # Create backup first
+          cp out/.config out/.config.backup
+          
+          # Use sed to enable KSU and MODULES
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' out/.config
           
-          echo "Building kernel (this may take a while)..."
-          make O=out ARCH=arm64 -j2 2>&1 | tail -100
+          # For GKI, also ensure these are disabled to prevent bootloops
+          sed -i 's/CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out/.config 2>/dev/null || true
+          sed -i 's/CONFIG_MODULE_SIG_ALL=y/# CONFIG_MODULE_SIG_ALL is not set/' out/.config 2>/dev/null || true
+          
+          echo "Starting build..."
+          # Build with limited parallelism to avoid memory issues
+          make O=out ARCH=arm64 -j2 2>&1 | tee build.log | grep -E "error|Error|ERROR|warning|Warning|WARNING"
+          
+          # Check if build was successful
+          if [ -f "out/arch/arm64/boot/Image" ]; then
+            echo "✓ Build successful!"
+            ls -lh out/arch/arm64/boot/Image
+          else
+            echo "✗ Build failed"
+            echo "=== Last 50 lines of build log ==="
+            tail -50 build.log
+            exit 1
+          fi
       
-      - name: Upload Kernel
-        if: success()
+      - name: Upload Kernel Image
         uses: actions/upload-artifact@v4
         with:
           name: kernel-image
           path: kernel/out/arch/arm64/boot/Image
-          retention-days: 1  # Keep only 1 day to save space
+          retention-days: 1
+      
+      - name: Upload Build Log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: kernel/build.log
+          retention-days: 1
