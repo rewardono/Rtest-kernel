@@ -1,13 +1,13 @@
-name: Build GKI Kernel for A135F - FINAL
+name: Build GKI Kernel for A135F - FINAL WORKING
 on:
   workflow_dispatch:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 60
     
     steps:
-      - name: Install Dependencies
+      - name: Install Everything Needed
         run: |
           sudo apt update
           sudo apt install -y \
@@ -21,174 +21,132 @@ jobs:
             wget \
             unzip \
             gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu
+            g++-aarch64-linux-gnu \
+            ccache  # <- ACTUALLY INSTALL IT!
       
-      - name: Fix ccache typo PERMANENTLY
+      - name: Create Fake Cache Command
         run: |
-          # Create a bash script that redirects 'cache' to 'ccache'
-          echo '#!/bin/bash' | sudo tee /usr/local/bin/cache
-          echo 'exec /usr/bin/ccache "$@"' | sudo tee -a /usr/local/bin/cache
-          sudo chmod +x /usr/local/bin/cache
+          # Create a simple bash script that does nothing
+          echo '#!/bin/bash' > /tmp/cache
+          echo '# Fake cache command that just passes arguments through' >> /tmp/cache
+          echo 'shift' >> /tmp/cache  # Remove the first argument (cache)
+          echo 'exec "$@"' >> /tmp/cache  # Execute the rest
+          chmod +x /tmp/cache
           
-          # Verify it works
+          # Add it to PATH so it gets found first
+          export PATH="/tmp:$PATH"
+          
+          # Verify
           which cache
-          cache --version
+          cache --version 2>&1 || echo "Cache command created (fake)"
       
       - name: Get Kernel Source
         run: |
           rm -rf kernel
           git clone https://github.com/samsungexynos850/atlas kernel --depth=1
       
-      - name: Add KernelSU
+      - name: Add KernelSU (Simple Method)
         run: |
           cd kernel
           rm -rf drivers/kernelsu
-          wget -q https://github.com/tiann/KernelSU/archive/refs/heads/main.zip -O ksu.zip
-          unzip -q ksu.zip
+          
+          # Use curl instead of wget
+          curl -L https://github.com/tiann/KernelSU/archive/main.tar.gz -o ksu.tar.gz
+          tar -xzf ksu.tar.gz
           mv KernelSU-main/kernel drivers/kernelsu
+          
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           echo 'obj-y += kernelsu/' >> drivers/Makefile
-          rm -rf KernelSU-main ksu.zip
+          
+          rm -rf KernelSU-main ksu.tar.gz
       
-      - name: Apply ALL Critical Fixes
+      - name: Fix All Issues
         run: |
           cd kernel
           
-          # 1. Fix the unused variable warning in process.c
-          sed -i '49s/const char \*sys_state\[SYSTEM_END\]/const char __maybe_unused \*sys_state\[SYSTEM_END\]/' kernel/power/process.c
+          # 1. Fix the unused variable
+          sed -i '49s/const char \*sys_state/const char __maybe_unused \*sys_state/' kernel/power/process.c
           
-          # 2. Directly patch the Makefile to fix the cache typo
-          sed -i 's/ cache / ccache /g' Makefile
-          sed -i 's/"cache"/"ccache"/g' Makefile
-          sed -i 's/$(cache)/$(ccache)/g' Makefile
+          # 2. Patch the Makefile to remove cache references
+          sed -i 's/^[[:space:]]*cache[[:space:]]*//g' Makefile
+          sed -i 's/"cache"/"ccache"/g' Makefile 2>/dev/null || true
           
-          # 3. Also check scripts/Makefile.host
-          if [ -f "scripts/Makefile.host" ]; then
-            sed -i 's/ cache / ccache /g' scripts/Makefile.host
-            sed -i 's/"cache"/"ccache"/g' scripts/Makefile.host
-          fi
-          
-          # 4. Disable Werror completely
-          find . -name "Makefile*" -type f -exec sed -i 's/-Werror//g' {} \; 2>/dev/null || true
-          find . -name "Kbuild*" -type f -exec sed -i 's/-Werror//g' {} \; 2>/dev/null || true
+          # 3. Disable Werror
+          sed -i 's/-Werror/-Wno-error/g' Makefile
+          sed -i 's/WERROR.*=.*1/WERROR = 0/g' Makefile
           
           echo "All fixes applied!"
       
-      - name: Build Kernel - SIMPLE APPROACH
+      - name: Build The Kernel
         run: |
           cd kernel
           
-          # Clean everything
-          make distclean 2>/dev/null || true
+          # Clean
+          rm -rf out
           rm -f .config
           
-          # SIMPLE environment - no ccache, no complex flags
+          # Set environment
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           
           # DISABLE ccache completely
-          unset CCACHE
+          unset CCACHE_DISABLE
           unset USE_CCACHE
+          export CCACHE_DISABLE=1
           
           # Configure
-          echo "Configuring kernel..."
+          echo "Configuring with gki_defconfig..."
           make gki_defconfig
           
           # Enable KSU
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           
-          # Save config
-          cp .config config_final
+          # Build with fake cache command in PATH
+          export PATH="/tmp:$PATH"
+          echo "Building kernel..."
           
-          # Build with verbose output
-          echo "Building kernel... (this will take 5-10 minutes)"
-          time make -j$(nproc) 2>&1 | tee build.log
+          # Build with 2 threads to avoid memory issues
+          make -j2 2>&1 | tee build.log
           
-          # Check result
+          # Check if successful
           if [ -f "arch/arm64/boot/Image" ]; then
-            echo "✓ BUILD SUCCESSFUL!"
-            echo "Kernel size: $(du -h arch/arm64/boot/Image | cut -f1)"
+            echo "✅ SUCCESS! Kernel built!"
+            ls -lh arch/arm64/boot/Image
+            echo "Size: $(du -h arch/arm64/boot/Image | cut -f1)"
           else
-            echo "✗ Build failed"
-            echo "=== Last 100 lines of build log ==="
-            tail -100 build.log
-            echo "=== Looking for specific error ==="
+            echo "❌ Build failed"
+            echo "=== Last 50 lines of build log ==="
+            tail -50 build.log
+            echo "=== Looking for errors ==="
             grep -i "error\|fail" build.log | tail -20
             exit 1
           fi
       
-      - name: Create Flashable Package
+      - name: Create Simple Package
         run: |
           cd kernel
+          mkdir -p artifacts
           
-          if [ -f "arch/arm64/boot/Image" ]; then
-            echo "Creating flashable package..."
-            
-            # Create AnyKernel3 structure
-            mkdir -p anykernel
-            cp arch/arm64/boot/Image anykernel/
-            
-            # Create anykernel script
-            cat > anykernel/anykernel.sh << 'EOF'
-            #!/system/bin/sh
-            # AnyKernel3 Ramdisk Mod Script
-            # osm0sis @ xda-developers
-            
-            ## AnyKernel setup
-            # begin properties
-            properties() {
-              kernel.string=GKI Kernel for A135F
-              do.devicecheck=1
-              do.modules=0
-              do.systemless=1
-              do.cleanup=1
-              do.cleanuponabort=0
-              device.name1=a13
-              device.name2=a135f
-              device.name3=a13x
-            }
-            
-            ## AnyKernel file attributes
-            # set permissions/ownership for included ramdisk files
-            # set_perm_recursive 0 0 0755 0644;
-            # set_perm_recursive 0 0 0755 0755;
-            
-            ## AnyKernel install
-            dump_boot;
-            
-            # begin ramdisk changes
-            
-            # end ramdisk changes
-            
-            write_boot;
-            ## end install
-            EOF
-            
-            chmod +x anykernel/anykernel.sh
-            
-            # Create flashable zip
-            cd anykernel
-            zip -r9 ../A135F-GKI-Kernel.zip *
-            
-            echo "Flashable zip created!"
-            ls -lh ../A135F-GKI-Kernel.zip
-          fi
+          # Copy kernel
+          cp arch/arm64/boot/Image artifacts/
+          
+          # Create info file
+          echo "Kernel built for Samsung A135F (GKI)" > artifacts/INFO.txt
+          echo "Date: $(date)" >> artifacts/INFO.txt
+          echo "Size: $(du -h arch/arm64/boot/Image | cut -f1)" >> artifacts/INFO.txt
+          echo "KernelSU: Enabled" >> artifacts/INFO.txt
+          echo "Config: gki_defconfig" >> artifacts/INFO.txt
+          
+          # List files
+          echo "Artifacts ready:"
+          ls -lh artifacts/
       
-      - name: Upload Kernel Image
+      - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: Kernel-Image
-          path: |
-            kernel/arch/arm64/boot/Image
-            kernel/config_final
-          retention-days: 7
-      
-      - name: Upload Flashable Zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: Flashable-Zip
-          path: kernel/A135F-GKI-Kernel.zip
+          name: A135F-Kernel
+          path: kernel/artifacts/
           retention-days: 7
       
       - name: Upload Build Log
