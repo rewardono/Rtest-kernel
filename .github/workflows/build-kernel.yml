@@ -1,12 +1,14 @@
-name: Build GKI Kernel for A135F - FINAL BOSS FIX
+name: Build GKI Kernel for Samsung A135F
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Allows manual triggering
+
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     
     steps:
+      # Step 1: Install all dependencies
       - name: Install Dependencies
         run: |
           sudo apt update
@@ -18,83 +20,63 @@ jobs:
             libssl-dev \
             libelf-dev \
             git \
+            ccache \
+            wget \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu
+          
+          # Fix the cache typo in the kernel source
+          sudo ln -sf /usr/bin/ccache /usr/local/bin/cache
+          echo "✅ Dependencies installed"
       
-      - name: Get Fresh Kernel Source
+      # Step 2: Get the kernel source
+      - name: Get Kernel Source
         run: |
           rm -rf kernel
           git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+          echo "✅ Kernel source downloaded"
       
-      - name: Fix ALL Compiler Flags
+      # Step 3: Fix all compilation issues
+      - name: Fix Compilation Issues
         run: |
           cd kernel
           
-          echo "=== Fixing ALL compiler flag issues ==="
-          
-          # 1. Fix the unused variable
+          # Fix 1: Unused variable warning
           sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c
           
-          # 2. Fix the malformed -implicit-function-declaration flag
-          echo "Fixing -implicit-function-declaration -> -Wimplicit-function-declaration..."
+          # Fix 2: Malformed compiler flags
+          echo "Fixing malformed compiler flags..."
+          find . -type f \( -name "Makefile*" -o -name "Kbuild*" \) -exec sed -i 's/-implicit-function-declaration/-Wimplicit-function-declaration/g' {} \; 2>/dev/null || true
+          find . -type f \( -name "Makefile*" -o -name "Kbuild*" \) -exec sed -i 's/=return-type/-Wreturn-type/g' {} \; 2>/dev/null || true
           
-          # Search for this flag in all files
-          grep -r "implicit-function-declaration" . 2>/dev/null | head -10 || true
+          # Fix 3: Remove problematic Werror flags
+          sed -i 's/-Werror-implicit-function-declaration//g' Makefile
+          sed -i 's/WERROR.*=.*1/WERROR = 0/g' Makefile
           
-          # Fix in all Makefiles
-          find . -type f \( -name "Makefile*" -o -name "Kbuild*" -o -name "*.mk" \) \
-            -exec sed -i 's/-implicit-function-declaration/-Wimplicit-function-declaration/g' {} \; 2>/dev/null || true
-          
-          # 3. Fix other potential malformed flags
-          echo "Fixing other malformed flags..."
-          
-          # Common malformed flags pattern
-          MALFORMED_FLAGS="implicit-function-declaration return-type missing-prototypes unused-but-set-variable"
-          
-          for flag in $MALFORMED_FLAGS; do
-            # Fix -flag to -Wflag
-            find . -type f \( -name "Makefile*" -o -name "Kbuild*" -o -name "*.mk" \) \
-              -exec sed -i "s/-$flag/-W$flag/g" {} \; 2>/dev/null || true
-            
-            # Fix =flag to -Wflag
-            find . -type f \( -name "Makefile*" -o -name "Kbuild*" -o -name "*.mk" \) \
-              -exec sed -i "s/=$flag/-W$flag/g" {} \; 2>/dev/null || true
-            
-            # Fix =-Wflag to -Wflag
-            find . -type f \( -name "Makefile*" -o -name "Kbuild*" -o -name "*.mk" \) \
-              -exec sed -i "s/=-W$flag/-W$flag/g" {} \; 2>/dev/null || true
-          done
-          
-          # 4. Remove all ccache references
-          echo "Removing ccache references..."
-          find . -type f \( -name "Makefile*" -o -name "Kbuild*" -o -name "*.mk" -o -name "*.sh" \) \
-            -exec sed -i 's/ccache //g' {} \; 2>/dev/null || true
-          
-          # 5. Check the specific command that was failing
-          echo "=== Checking the exact failing command ==="
-          if [ -f "Makefile" ]; then
-            echo "Looking for KBUILD_CFLAGS in Makefile:"
-            grep -n "KBUILD_CFLAGS" Makefile | head -5
-            
-            echo "Looking for CFLAGS in arch/arm64/Makefile:"
-            grep -n "CFLAGS" arch/arm64/Makefile 2>/dev/null | head -5 || true
-          fi
+          echo "✅ All fixes applied"
       
+      # Step 4: Add KernelSU
       - name: Add KernelSU
         run: |
           cd kernel
           rm -rf drivers/kernelsu
-          git clone https://github.com/tiann/KernelSU --depth=1 ksu_tmp
-          mv ksu_tmp/kernel drivers/kernelsu
+          wget -q https://github.com/tiann/KernelSU/archive/main.tar.gz -O ksu.tar.gz
+          tar -xzf ksu.tar.gz
+          mv KernelSU-main/kernel drivers/kernelsu
+          
+          # Add KernelSU to build system
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           echo 'obj-y += kernelsu/' >> drivers/Makefile
-          rm -rf ksu_tmp
+          
+          rm -rf KernelSU-main ksu.tar.gz
+          echo "✅ KernelSU added"
       
-      - name: Build Kernel with Direct Compiler Override
+      # Step 5: Configure the kernel
+      - name: Configure Kernel
         run: |
           cd kernel
           
-          # Clean everything
+          # Clean any previous builds
           make distclean 2>/dev/null || true
           rm -f .config
           
@@ -102,192 +84,98 @@ jobs:
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           
-          # Configure
-          echo "Configuring kernel..."
+          # Configure for GKI
           make gki_defconfig
           
-          # Enable KSU and modules
+          # Enable KernelSU
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           
-          # Save config
-          cp .config .config.original
+          # Disable module signing to prevent bootloops
+          echo "# CONFIG_MODULE_SIG is not set" >> .config
+          echo "# CONFIG_MODULE_SIG_FORCE is not set" >> .config
           
-          echo "Starting build with direct compiler override..."
-          
-          # Build with specific override for the problematic flag
-          # We'll use KCFLAGS to override the problematic flag
-          export KCFLAGS="-Wno-error -Wno-implicit-function-declaration"
-          
-          # First, try to build the specific target that was failing
-          echo "=== Testing kernel/bounds.s ==="
-          make V=1 kernel/bounds.s 2>&1 | tee test_build.log
-          
-          if [ -f "kernel/bounds.s" ]; then
-            echo "✅ kernel/bounds.s built successfully!"
-            
-            # Now build everything
-            echo "Building full kernel..."
-            make -j$(nproc) 2>&1 | tee full_build.log
-            
-            if [ -f "arch/arm64/boot/Image" ]; then
-              echo "🎉 KERNEL BUILD SUCCESSFUL!"
-            else
-              echo "❌ Full build failed"
-              tail -100 full_build.log
-              exit 1
-            fi
-          else
-            echo "❌ kernel/bounds.s failed"
-            
-            # Try a different approach - edit the command directly
-            echo "Trying manual fix..."
-            
-            # Find the exact command that was run
-            echo "=== Last compiler command from log ==="
-            grep "aarch64-linux-gnu-gcc.*bounds" test_build.log | tail -1
-            
-            # Try building with a wrapper script
-            echo "Creating compiler wrapper to fix flags..."
-            
-            cat > /tmp/fixed_gcc << 'EOF'
-#!/bin/bash
-# Wrapper to fix malformed compiler flags
-ARGS=()
-for arg in "$@"; do
-  # Fix -implicit-function-declaration to -Wimplicit-function-declaration
-  if [ "$arg" = "-implicit-function-declaration" ]; then
-    arg="-Wimplicit-function-declaration"
-  fi
-  # Fix other malformed flags
-  if [[ "$arg" == "-"*=* ]]; then
-    # Convert -flag=value to -flag=value (but check if it's malformed)
-    arg=$(echo "$arg" | sed 's/^-\([^=]*\)=\(.*\)/-\1=\2/')
-  fi
-  ARGS+=("$arg")
-done
-
-# Call the real compiler
-exec aarch64-linux-gnu-gcc "${ARGS[@]}"
-EOF
-            
-            chmod +x /tmp/fixed_gcc
-            
-            # Try building with the wrapper
-            export CC="/tmp/fixed_gcc"
-            make clean
-            make kernel/bounds.s 2>&1 | tail -50
-            
-            if [ -f "kernel/bounds.s" ]; then
-              echo "✅ Fixed with wrapper!"
-              make -j$(nproc) 2>&1 | tee wrapper_build.log
-            else
-              echo "❌ Wrapper also failed"
-              exit 1
-            fi
-          fi
+          echo "✅ Kernel configured"
+          cp .config .config.before_build
       
-      - name: Alternative - Patch KBUILD_CFLAGS Directly
-        if: failure()
+      # Step 6: Build the kernel
+      - name: Build Kernel
         run: |
           cd kernel
           
-          echo "Trying direct patch of KBUILD_CFLAGS..."
+          echo "🚀 Building kernel... This will take 10-20 minutes"
           
-          # Find where the malformed flag is defined
-          echo "Searching for flag definitions..."
-          grep -r "implicit-function-declaration" . 2>/dev/null || true
+          # Build with all available cores
+          make -j$(nproc) 2>&1 | tee build.log
           
-          # Patch the main Makefile to remove problematic flags
-          if [ -f "Makefile" ]; then
-            echo "Patching Makefile KBUILD_CFLAGS..."
-            
-            # Backup
-            cp Makefile Makefile.backup
-            
-            # Remove problematic flags from KBUILD_CFLAGS
-            sed -i 's/ -implicit-function-declaration//g' Makefile
-            sed -i 's/ -Werror-implicit-function-declaration//g' Makefile
-            
-            # Also check arch/arm64/Makefile
-            if [ -f "arch/arm64/Makefile" ]; then
-              sed -i 's/ -implicit-function-declaration//g' arch/arm64/Makefile
-            fi
-          fi
-          
-          # Clean and try again
-          make distclean
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          
-          make gki_defconfig
-          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
-          sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
-          
-          echo "Building after direct patch..."
-          make -j1 2>&1 | tail -100
-      
-      - name: Prepare Success Artifacts
-        if: success()
-        run: |
-          cd kernel
-          
+          # Check if build was successful
           if [ -f "arch/arm64/boot/Image" ]; then
-            echo "🎉🎉🎉 FINAL SUCCESS! 🎉🎉🎉"
-            echo "Kernel built for Samsung A135F (GKI)"
-            echo "File: arch/arm64/boot/Image"
-            echo "Size: $(du -h arch/arm64/boot/Image | cut -f1)"
-            
-            mkdir -p artifacts
-            cp arch/arm64/boot/Image artifacts/
-            
-            # Create success info
-            cat > artifacts/SUCCESS.md << 'EOF'
-            # CONGRATULATIONS!
-            
-            You have successfully built a GKI kernel for Samsung A135F!
-            
-            ## What you have:
-            1. GKI kernel Image (Generic Kernel Image)
-            2. KernelSU integrated
-            3. For Exynos 850 chipset
-            
-            ## How to flash:
-            
-            ### Method 1: Using AnyKernel3
-            1. Download AnyKernel3 template from: https://github.com/osm0sis/AnyKernel3
-            2. Replace the Image file in the zip
-            3. Flash via custom recovery (TWRP/OrangeFox)
-            
-            ### Method 2: Manual boot.img patching
-            1. Extract boot.img from your stock firmware
-            2. Use Android Image Kitchen (AIK) to unpack
-            3. Replace the kernel with this Image file
-            4. Repack and flash with Odin
-            
-            ## Important Notes:
-            - This is a GKI kernel for a non-GKI device
-            - Backup your current kernel first!
-            - Have Odin ready in case of bootloop
-            - Test basic functions after flashing
-            
-            ## Build Details:
-            - Kernel version: 4.19.325
-            - Platform: Android 13
-            - Chipset: Exynos 850
-            - Device: Samsung Galaxy A135F
-            EOF
-            
-            echo "Artifacts ready:"
-            ls -lh artifacts/
+            echo "🎉 SUCCESS! Kernel built successfully!"
+            echo "Kernel size: $(du -h arch/arm64/boot/Image | cut -f1)"
           else
-            echo "❌ No kernel Image found"
+            echo "❌ Build failed"
+            echo "=== Last 50 lines of build log ==="
+            tail -50 build.log
             exit 1
           fi
       
-      - name: Upload Kernel
+      # Step 7: Create flashable package
+      - name: Create Flashable Package
+        run: |
+          cd kernel
+          
+          echo "📦 Creating flashable package..."
+          
+          # Create AnyKernel3 structure
+          mkdir -p anykernel
+          cp arch/arm64/boot/Image anykernel/
+          
+          # Create anykernel.sh script
+          cat > anykernel/anykernel.sh << 'EOF'
+          #!/system/bin/sh
+          # AnyKernel3 Ramdisk Mod Script
+          
+          ## AnyKernel setup
+          properties() {
+            kernel.string=GKI Kernel for A135F
+            do.devicecheck=1
+            do.modules=0
+            do.systemless=1
+            do.cleanup=1
+            device.name1=a13
+            device.name2=a135f
+            device.name3=a13x
+          }
+          
+          ## AnyKernel install
+          dump_boot;
+          write_boot;
+          ## end install
+          EOF
+          
+          chmod +x anykernel/anykernel.sh
+          
+          # Create zip
+          cd anykernel
+          zip -r9 ../A135F-GKI-Kernel.zip *
+          
+          echo "✅ Flashable zip created: A135F-GKI-Kernel.zip"
+          ls -lh ../A135F-GKI-Kernel.zip
+      
+      # Step 8: Upload artifacts
+      - name: Upload Kernel Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: A135F-GKI-KERNEL-FINAL
-          path: kernel/artifacts/
+          name: A135F-Kernel-Files
+          path: |
+            kernel/arch/arm64/boot/Image
+            kernel/A135F-GKI-Kernel.zip
+            kernel/.config.before_build
           retention-days: 7
+      
+      - name: Upload Build Log
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Logs
+          path: kernel/build.log
+          retention-days: 3
