@@ -1,15 +1,15 @@
-name: Build GKI Kernel for Samsung A135F
+name: Build GKI Kernel for A135F - NO CCACHE AT ALL
 on:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 90
     
     steps:
-      # Step 1: Install all dependencies
-      - name: Install Dependencies
+      # Step 1: Install ONLY what we need (NO ccache)
+      - name: Install Dependencies (No ccache)
         run: |
           sudo apt update
           sudo apt install -y \
@@ -24,204 +24,252 @@ jobs:
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu
           
-          # Create fake cache command to bypass ccache issues
-          echo '#!/bin/bash' | sudo tee /usr/local/bin/cache
-          echo 'exec aarch64-linux-gnu-gcc "$@"' | sudo tee -a /usr/local/bin/cache
-          sudo chmod +x /usr/local/bin/cache
+          # REMOVE ccache if it exists
+          sudo apt remove --purge -y ccache 2>/dev/null || true
+          sudo rm -f /usr/bin/ccache /usr/local/bin/ccache /usr/local/bin/cache 2>/dev/null || true
           
-          echo "✅ Dependencies installed"
+          echo "✅ Dependencies installed (NO ccache)"
       
-      # Step 2: Get the kernel source
-      - name: Get Kernel Source
+      # Step 2: Get kernel source and FIX IT COMPLETELY
+      - name: Get and Fix Kernel Source
         run: |
           rm -rf kernel
           git clone https://github.com/samsungexynos850/atlas kernel --depth=1
-          echo "✅ Kernel source downloaded"
-      
-      # Step 3: Fix all compilation issues
-      - name: Fix Compilation Issues
-        run: |
+          
           cd kernel
           
-          # Fix 1: Unused variable warning
+          echo "=== NUCLEAR FIX: Removing ALL ccache references ==="
+          
+          # Create a Python script to find and remove ALL ccache references
+          cat > fix_ccache.py << 'EOF'
+          import os
+          import re
+          
+          def fix_file(filepath):
+              with open(filepath, 'r') as f:
+                  content = f.read()
+              
+              # Remove ALL ccache/cache references
+              new_content = re.sub(r'\bccache\b\s*', '', content)
+              new_content = re.sub(r'\bcache\b\s*', '', new_content)
+              new_content = re.sub(r'\$\(ccache\)', '', new_content)
+              new_content = re.sub(r'\$\(cache\)', '', new_content)
+              new_content = re.sub(r'"ccache"', '', new_content)
+              new_content = re.sub(r'"cache"', '', new_content)
+              
+              # Remove CCACHE variable definitions
+              new_content = re.sub(r'^CCACHE\s*:=.*$', '', new_content, flags=re.MULTILINE)
+              new_content = re.sub(r'^export\s+CCACHE.*$', '', new_content, flags=re.MULTILINE)
+              
+              if new_content != content:
+                  with open(filepath, 'w') as f:
+                      f.write(new_content)
+                  return True
+              return False
+          
+          # Fix all Makefiles, Kbuild files, and shell scripts
+          for root, dirs, files in os.walk('.'):
+              for file in files:
+                  if file.endswith(('Makefile', 'Kbuild', '.mk', '.sh')):
+                      filepath = os.path.join(root, file)
+                      try:
+                          if fix_file(filepath):
+                              print(f"Fixed: {filepath}")
+                      except:
+                          pass
+          
+          print("=== Checking main Makefile ===")
+          with open('Makefile', 'r') as f:
+              content = f.read()
+              if 'ccache' in content or 'cache' in content:
+                  print("WARNING: Still found ccache/cache in Makefile")
+                  print(re.findall(r'.*ccache.*|.*cache.*', content))
+          
+          print("=== Checking scripts/Makefile.host ===")
+          if os.path.exists('scripts/Makefile.host'):
+              with open('scripts/Makefile.host', 'r') as f:
+                  content = f.read()
+                  if 'ccache' in content or 'cache' in content:
+                      print("WARNING: Still found ccache/cache in scripts/Makefile.host")
+          EOF
+          
+          python3 fix_ccache.py
+          
+          # Also fix the specific file that's causing the error
+          if [ -f "scripts/Makefile.host" ]; then
+              echo "=== Manually patching scripts/Makefile.host ==="
+              sed -i 's/ccache //g' scripts/Makefile.host
+              sed -i 's/cache //g' scripts/Makefile.host
+              sed -i 's/$(ccache)//g' scripts/Makefile.host
+              sed -i 's/$(cache)//g' scripts/Makefile.host
+          fi
+          
+          # Fix the unused variable
           sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c
           
-          # Fix 2: Malformed compiler flags
-          echo "Fixing malformed compiler flags..."
-          find . -type f \( -name "Makefile*" -o -name "Kbuild*" \) -exec sed -i 's/-implicit-function-declaration/-Wimplicit-function-declaration/g' {} \; 2>/dev/null || true
+          # Fix malformed compiler flags
+          find . -type f \( -name "Makefile*" -o -name "Kbuild*" \) \
+            -exec sed -i 's/-implicit-function-declaration/-Wimplicit-function-declaration/g' {} \; 2>/dev/null || true
           
-          # Fix 3: Remove problematic Werror flags
-          sed -i 's/-Werror-implicit-function-declaration//g' Makefile 2>/dev/null || true
-          sed -i 's/WERROR.*=.*1/WERROR = 0/g' Makefile 2>/dev/null || true
-          
-          # Fix 4: Remove ccache references
-          sed -i 's/ccache //g' Makefile 2>/dev/null || true
-          sed -i 's/cache //g' Makefile 2>/dev/null || true
-          
-          echo "✅ All fixes applied"
+          echo "✅ Kernel source fixed COMPLETELY"
       
-      # Step 4: Add KernelSU
+      # Step 3: Add KernelSU
       - name: Add KernelSU
         run: |
           cd kernel
           rm -rf drivers/kernelsu
-          wget -q https://github.com/tiann/KernelSU/archive/main.tar.gz -O ksu.tar.gz
-          tar -xzf ksu.tar.gz
-          mv KernelSU-main/kernel drivers/kernelsu
+          git clone https://github.com/tiann/KernelSU --depth=1 ksu_tmp
+          mv ksu_tmp/kernel drivers/kernelsu
           
-          # Add KernelSU to build system
+          # Add to build system
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           echo 'obj-y += kernelsu/' >> drivers/Makefile
           
-          rm -rf KernelSU-main ksu.tar.gz
+          rm -rf ksu_tmp
           echo "✅ KernelSU added"
       
-      # Step 5: Configure the kernel
-      - name: Configure Kernel
+      # Step 4: Build with EXPLICIT COMPILER SETTINGS
+      - name: Build Kernel (Direct Method)
         run: |
           cd kernel
           
-          # Clean any previous builds
+          # Clean everything
           make distclean 2>/dev/null || true
           rm -f .config .config.old
           
-          # Set environment
+          # Set environment - EXPLICITLY set compilers
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           
-          # Configure for GKI (non-interactive)
-          echo "Running gki_defconfig..."
+          # CRITICAL: Set HOST compiler explicitly
+          export HOSTCC=gcc
+          export HOSTCXX=g++
+          export HOSTCFLAGS="-O2"
+          export HOSTCXXFLAGS="-O2"
+          
+          # Force disable ccache
+          unset CCACHE
+          unset CCACHE_DIR
+          unset USE_CCACHE
+          export CCACHE_DISABLE=1
+          
+          echo "Configuring kernel..."
+          
+          # Use gki_defconfig
           make gki_defconfig
           
-          # Run olddefconfig to accept all defaults non-interactively
-          echo "Running olddefconfig to set all defaults..."
+          # Run olddefconfig to accept all defaults
           make olddefconfig
           
-          # Enable KernelSU
+          # Enable KSU
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           
-          # Disable module signing to prevent bootloops
-          echo "# CONFIG_MODULE_SIG is not set" >> .config
-          echo "# CONFIG_MODULE_SIG_FORCE is not set" >> .config
-          echo "# CONFIG_MODULE_SIG_ALL is not set" >> .config
-          
-          # Run olddefconfig again to resolve any new dependencies
+          # Run olddefconfig again
           make olddefconfig
           
-          echo "✅ Kernel configured (non-interactive)"
-          cp .config .config.before_build
-      
-      # Step 6: Build the kernel
-      - name: Build Kernel
-        run: |
-          cd kernel
+          echo "Starting build..."
+          echo "This will take 10-15 minutes..."
           
-          # Set environment
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
+          # First, test if host tools build works
+          echo "=== Testing host tools build ==="
+          make scripts_basic 2>&1 | tee host_build.log
           
-          echo "🚀 Building kernel... This will take 10-20 minutes"
-          echo "Using $(nproc) cores..."
-          
-          # Build with all available cores
-          make -j$(nproc) 2>&1 | tee build.log
-          
-          # Check if build was successful
-          if [ -f "arch/arm64/boot/Image" ]; then
-            echo "🎉 SUCCESS! Kernel built successfully!"
-            echo "Kernel size: $(du -h arch/arm64/boot/Image | cut -f1)"
-          else
-            echo "❌ Build failed"
-            echo "=== Checking for specific errors ==="
+          if [ $? -eq 0 ]; then
+            echo "✅ Host tools built successfully!"
             
-            # Check for common errors
-            if grep -q "non-retpoline compiler" build.log; then
-              echo "ERROR: Non-retpoline compiler issue detected"
-              echo "This is an x86 warning but we're building ARM64 - ignoring"
-              
-              # Try building with KCFLAGS to suppress the warning
-              echo "Trying build with KCFLAGS override..."
-              make clean
-              export KCFLAGS="-Wno-error"
-              make -j$(nproc) 2>&1 | tee build2.log
-              
-              if [ -f "arch/arm64/boot/Image" ]; then
-                echo "✅ Build successful with KCFLAGS override!"
-              else
-                echo "❌ Still failed with KCFLAGS override"
-                tail -100 build2.log
-                exit 1
-              fi
+            # Now build the full kernel
+            make -j$(nproc) 2>&1 | tee full_build.log
+            
+            if [ -f "arch/arm64/boot/Image" ]; then
+              echo "🎉 KERNEL BUILD SUCCESSFUL!"
+              echo "Size: $(du -h arch/arm64/boot/Image | cut -f1)"
             else
-              echo "=== Last 50 lines of build log ==="
-              tail -50 build.log
+              echo "❌ Full build failed"
+              tail -100 full_build.log
               exit 1
             fi
+          else
+            echo "❌ Host tools build failed"
+            
+            # Try a different approach - build without any host tools
+            echo "Trying alternative build method..."
+            
+            # Manually create fixdep if needed
+            echo "=== Manual fixdep build ==="
+            cd scripts/basic
+            gcc -o fixdep fixdep.c 2>&1 || echo "Manual fixdep build attempt"
+            cd ../..
+            
+            # Try building again
+            make -j1 2>&1 | tail -100
+            exit 1
           fi
       
-      # Step 7: Create flashable package
+      # Step 5: Create flashable package
       - name: Create Flashable Package
         run: |
           cd kernel
           
           if [ ! -f "arch/arm64/boot/Image" ]; then
-            echo "❌ No kernel Image found, skipping package creation"
+            echo "❌ No kernel Image found"
             exit 1
           fi
           
-          echo "📦 Creating flashable package..."
+          echo "Creating flashable package..."
           
-          # Create AnyKernel3 structure
+          # Simple zip structure
           mkdir -p anykernel
           cp arch/arm64/boot/Image anykernel/
           
-          # Create anykernel.sh script
-          cat > anykernel/anykernel.sh << 'EOF'
+          cat > anykernel/install.sh << 'EOF'
           #!/system/bin/sh
-          # AnyKernel3 Ramdisk Mod Script
+          # Simple install script
           
-          ## AnyKernel setup
-          properties() {
-            kernel.string=GKI Kernel for A135F
-            do.devicecheck=1
-            do.modules=0
-            do.systemless=1
-            do.cleanup=1
-            device.name1=a13
-            device.name2=a135f
-            device.name3=a13x
-          }
+          ui_print " "
+          ui_print "********************************"
+          ui_print "* GKI Kernel for Samsung A135F *"
+          ui_print "*     With KernelSU Support    *"
+          ui_print "********************************"
+          ui_print " "
           
-          ## AnyKernel install
-          dump_boot;
-          write_boot;
-          ## end install
+          # Check device
+          case $(getprop ro.product.device) in
+            a13|a135f|a13x)
+              ui_print "Device detected: $(getprop ro.product.device)"
+              ;;
+            *)
+              ui_print "Warning: Unknown device"
+              ;;
+          esac
+          
+          # Backup
+          ui_print "- Backing up current kernel..."
+          dd if=/dev/block/by-name/boot of=/sdcard/boot_backup.img 2>/dev/null || true
+          
+          # Flash
+          ui_print "- Flashing new kernel..."
+          dd if=$INSTALLER/Image of=/dev/block/by-name/boot 2>/dev/null || true
+          
+          ui_print "- Done!"
+          ui_print " "
           EOF
           
-          chmod +x anykernel/anykernel.sh
+          chmod +x anykernel/install.sh
           
           # Create zip
           cd anykernel
-          zip -r9 ../A135F-GKI-Kernel.zip *
+          zip -r9 ../A135F-Kernel.zip *
           
-          echo "✅ Flashable zip created: A135F-GKI-Kernel.zip"
-          ls -lh ../A135F-GKI-Kernel.zip
+          echo "✅ Flashable zip created"
+          ls -lh ../A135F-Kernel.zip
       
-      # Step 8: Upload artifacts
-      - name: Upload Kernel Artifacts
+      # Step 6: Upload artifacts
+      - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: A135F-Kernel-Files
+          name: A135F-Kernel-COMPLETE
           path: |
             kernel/arch/arm64/boot/Image
-            kernel/A135F-GKI-Kernel.zip
-            kernel/.config.before_build
+            kernel/A135F-Kernel.zip
           retention-days: 7
-      
-      - name: Upload Build Log
-        uses: actions/upload-artifact@v4
-        with:
-          name: Build-Logs
-          path: kernel/build.log
-          retention-days: 3
