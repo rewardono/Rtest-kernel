@@ -1,4 +1,4 @@
-name: Build GKI Kernel for A135F (Fixed)
+name: Build GKI Kernel for A135F
 on:
   workflow_dispatch:
 jobs:
@@ -20,13 +20,12 @@ jobs:
             git \
             ccache \
             wget \
-            unzip
-            
-          # Install proper ARM64 cross-compiler
-          sudo apt install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
-          
-          # Also install clang for better compatibility
-          sudo apt install -y clang llvm lld
+            unzip \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            clang \
+            llvm \
+            lld
       
       - name: Get Kernel Source
         run: |
@@ -44,19 +43,32 @@ jobs:
           echo 'obj-y += kernelsu/' >> drivers/Makefile
           rm -rf KernelSU-main ksu.zip
       
-      - name: Build Kernel
+      - name: Fix Compilation Issue
+        run: |
+          cd kernel
+          # Fix the unused variable warning in kernel/power/process.c
+          # Option 1: Comment out the unused variable
+          sed -i '49s/const char \*sys_state/\/\/ const char \*sys_state/' kernel/power/process.c
+          
+          # Option 2: Mark it as unused
+          # sed -i '49s/const char \*sys_state/const char __maybe_unused \*sys_state/' kernel/power/process.c
+          
+          # Also try to disable Werror for this specific file
+          echo 'CFLAGS_process.o := -Wno-error' >> kernel/power/Makefile
+      
+      - name: Build Kernel with CLANG
         run: |
           cd kernel
           
-          # Try different toolchain approaches
-          
-          # APPROACH 1: Use GCC cross-compiler
-          echo "=== Approach 1: Using GCC cross-compiler ==="
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          
           # Clean any previous builds
           make distclean 2>/dev/null || true
+          
+          # Use CLANG - it's often more lenient with warnings
+          export ARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-gnu-
           
           # Configure
           make gki_defconfig
@@ -65,68 +77,74 @@ jobs:
           sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
           sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
           
-          # Try to build
-          if make -j2 2>&1 | tee build_gcc.log; then
-            echo "GCC build successful!"
-            BUILD_METHOD="gcc"
+          # Disable module signing
+          sed -i 's/CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' .config 2>/dev/null || true
+          
+          # Build with CLANG
+          echo "Building with CLANG..."
+          make CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip -j$(nproc) 2>&1 | tee build.log
+          
+          # Check if build succeeded
+          if [ -f "arch/arm64/boot/Image" ]; then
+            echo "✓ Build successful!"
+            cp arch/arm64/boot/Image kernel-Image
+            exit 0
+          fi
+          
+          echo "CLANG build failed, trying GCC with specific flags..."
+          
+          # Try GCC with specific flags to disable the warning
+          make distclean 2>/dev/null || true
+          make gki_defconfig
+          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
+          sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
+          
+          # Build with GCC but disable the specific warning
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export KCFLAGS="-Wno-unused-variable -Wno-error=unused-variable"
+          
+          make -j$(nproc) 2>&1 | tee build_gcc.log
+          
+          if [ -f "arch/arm64/boot/Image" ]; then
+            echo "✓ GCC build successful!"
             cp arch/arm64/boot/Image kernel-Image
           else
-            echo "GCC build failed, trying CLANG..."
-            
-            # APPROACH 2: Use CLANG
-            make distclean 2>/dev/null || true
-            make gki_defconfig
-            sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' .config
-            sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' .config
-            
-            export LLVM=1
-            export LLVM_IAS=1
-            export CLANG_TRIPLE=aarch64-linux-gnu-
-            export CROSS_COMPILE=aarch64-linux-gnu-
-            
-            if make CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip -j2 2>&1 | tee build_clang.log; then
-              echo "CLANG build successful!"
-              BUILD_METHOD="clang"
-              cp arch/arm64/boot/Image kernel-Image
-            else
-              echo "Both GCC and CLANG failed"
-              echo "=== GCC build errors ==="
-              grep -i "error\|fail" build_gcc.log | head -20
-              echo "=== CLANG build errors ==="
-              grep -i "error\|fail" build_clang.log | head -20
-              exit 1
-            fi
+            echo "✗ Both builds failed"
+            echo "=== Last errors from CLANG build ==="
+            tail -50 build.log | grep -i "error\|fail" || true
+            echo "=== Last errors from GCC build ==="
+            tail -50 build_gcc.log | grep -i "error\|fail" || true
+            exit 1
           fi
       
-      - name: Check and Prepare Artifacts
+      - name: Prepare Artifacts
         run: |
           cd kernel
           
           if [ -f "kernel-Image" ]; then
-            echo "✓ Kernel build successful!"
-            echo "Build method: $BUILD_METHOD"
-            ls -lh kernel-Image
+            echo "✓ Kernel Image created successfully!"
+            echo "File size: $(du -h kernel-Image | cut -f1)"
             
-            # Create artifacts directory
             mkdir -p artifacts
             cp kernel-Image artifacts/
             
-            # Also try to compress it
+            # Create compressed version too
             gzip -k -f kernel-Image
             cp kernel-Image.gz artifacts/ 2>/dev/null || true
             
-            echo "Files in artifacts directory:"
+            echo "Artifacts ready:"
             ls -lh artifacts/
           else
             echo "✗ No kernel Image found"
-            echo "Looking for build logs..."
-            ls -la build_*.log 2>/dev/null || echo "No build logs found"
+            echo "Checking build directory..."
+            find . -name "Image" -type f | head -5
             exit 1
           fi
       
-      - name: Upload Kernel Image
+      - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: A135F-GKI-Kernel-Image
+          name: A135F-GKI-Kernel
           path: kernel/artifacts/
           retention-days: 7
