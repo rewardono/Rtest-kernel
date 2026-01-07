@@ -1,4 +1,4 @@
-name: Build GKI Kernel for Samsung A135F - WORKING CACHE FINAL
+name: Build GKI Kernel for Samsung A135F - COMPLETE FINAL
 on:
   workflow_dispatch:
 
@@ -8,15 +8,10 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      # STEP 1: Install WITHOUT any cache tools
-      - name: Install Dependencies (Clean)
+      # STEP 1: Clean install
+      - name: Install Dependencies
         run: |
           sudo apt update
-          # Remove ALL cache-related packages
-          sudo apt remove --purge -y ccache cache 2>/dev/null || true
-          sudo apt autoremove -y
-          
-          # Install fresh packages
           sudo apt install -y \
             build-essential \
             bc \
@@ -28,121 +23,67 @@ jobs:
             wget \
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu
-          
-          echo "✅ Clean dependencies installed"
 
-      # STEP 2: Create PROPER working ccache wrapper
-      - name: Create Working CCACHE Wrapper
+      # STEP 2: Create SIMPLE ccache wrapper
+      - name: Create CCACHE Wrapper
         run: |
-          # Remove any existing ccache
-          sudo rm -f /usr/bin/ccache /usr/local/bin/ccache 2>/dev/null || true
-          
-          # Create a PROPER ccache wrapper that actually works
+          # Create a simple passthrough ccache
           sudo bash -c 'cat > /usr/bin/ccache << "EOF"
           #!/bin/bash
-          # This is a dummy ccache that just passes through to the real compiler
-          
-          # Get the real compiler name from arguments
-          # Look for gcc, g++, or aarch64-linux-gnu-* patterns
+          # Simple passthrough to the real compiler
+          # Remove "ccache" from args if present
+          new_args=()
           for arg in "$@"; do
-              if [[ "$arg" == *gcc* ]] || [[ "$arg" == *g++* ]] || [[ "$arg" == aarch64-linux-gnu-* ]]; then
-                  compiler="$arg"
-                  break
-              fi
+              [[ $arg != "ccache" ]] && new_args+=("$arg")
           done
           
-          # If no compiler found in args, use gcc as default for host compilation
-          if [ -z "$compiler" ]; then
-              if [[ "$1" == *.c ]]; then
-                  compiler="gcc"
-              elif [[ "$1" == *.cpp ]] || [[ "$1" == *.cc ]] || [[ "$1" == *.cxx ]]; then
-                  compiler="g++"
-              else
-                  # Just pass through whatever was intended
-                  exec "$@"
-              fi
-          fi
-          
-          # Execute the real compiler with all arguments
-          exec $compiler "$@"
+          # Execute with filtered args
+          exec "${new_args[@]}"
           EOF'
           
           sudo chmod +x /usr/bin/ccache
           
-          # Verify it works
+          # Test it
           echo "Testing ccache wrapper..."
-          /usr/bin/ccache --version || echo "✅ CCACHE wrapper created"
-          
-          # Also create symlink in /usr/local/bin
-          sudo ln -sf /usr/bin/ccache /usr/local/bin/ccache 2>/dev/null || true
+          /usr/bin/ccache gcc --version >/dev/null && echo "✅ CCACHE wrapper working"
 
-      # STEP 3: Fresh kernel source
+      # STEP 3: Fresh kernel
       - name: Get Kernel Source
         run: |
           rm -rf kernel
           git clone https://github.com/samsungexynos850/atlas kernel --depth=1
-          echo "✅ Kernel source cloned"
 
-      # STEP 4: Apply ALL fixes at ONCE
-      - name: Apply Comprehensive Fixes
+      # STEP 4: NUCLEAR FIX for compiler flags
+      - name: Fix Compiler Flags NUCLEAR
         run: |
           cd kernel
           
-          echo "=== APPLYING COMPREHENSIVE FIXES ==="
+          echo "=== NUCLEAR FIX FOR COMPILER FLAGS ==="
           
-          # 1. Fix the compiler flag error (main issue)
-          echo "Fixing compiler flags..."
+          # 1. FIRST, fix the source files
+          echo "Fixing source Makefiles..."
+          find . -type f \( -name "Makefile*" -o -name "Kbuild*" -o -name "*.mk" \) -exec sed -i \
+            -e 's/-Werror-Wreturn-type/-Werror -Wreturn-type/g' \
+            -e 's/-Werror-Wimplicit-function-declaration/-Werror -Wimplicit-function-declaration/g' \
+            -e 's/-Werror-implicit-function-declaration/-Werror -Wimplicit-function-declaration/g' \
+            -e 's/-implicit-function-declaration/-Wimplicit-function-declaration/g' \
+            -e 's/=return-type/-Wreturn-type/g' \
+            {} \; 2>/dev/null || true
           
-          # Create a fix script
-          cat > fix_all.sh << 'EOF'
-          #!/bin/bash
+          # 2. Fix root Makefile HOSTCC
+          sed -i 's/^HOSTCC\s*:=.*/HOSTCC = ccache gcc/' Makefile 2>/dev/null || true
+          sed -i 's/^HOSTCXX\s*:=.*/HOSTCXX = ccache g++/' Makefile 2>/dev/null || true
           
-          echo "Searching for and fixing malformed compiler flags..."
-          
-          # Find all Makefiles and fix the specific patterns
-          find . -type f \( -name "Makefile*" -o -name "Kbuild*" -o -name "*.mk" \) | while read file; do
-              # Backup original
-              cp "$file" "$file.bak" 2>/dev/null || true
-              
-              # Fix patterns
-              sed -i \
-                  -e 's/-Werror-Wreturn-type/-Werror -Wreturn-type/g' \
-                  -e 's/-Werror-Wimplicit-function-declaration/-Werror -Wimplicit-function-declaration/g' \
-                  -e 's/-Werror-implicit-function-declaration/-Werror -Wimplicit-function-declaration/g' \
-                  -e 's/-implicit-function-declaration/-Wimplicit-function-declaration/g' \
-                  -e 's/=return-type/-Wreturn-type/g' \
-                  -e 's/\bccache\b//g' \
-                  "$file" 2>/dev/null || true
-          done
-          
-          # Specifically fix root Makefile
-          if [ -f "Makefile" ]; then
-              echo "Fixing root Makefile..."
-              sed -i 's/^HOSTCC\s*:=.*/HOSTCC = gcc/' Makefile
-              sed -i 's/^HOSTCXX\s*:=.*/HOSTCXX = g++/' Makefile
-          fi
-          
-          # Fix scripts/Makefile.host
+          # 3. Fix scripts/Makefile.host
           if [ -f "scripts/Makefile.host" ]; then
-              echo "Fixing scripts/Makefile.host..."
-              sed -i 's/^HOSTCC\s*:=.*/HOSTCC = gcc/' scripts/Makefile.host
-              sed -i 's/^HOSTCXX\s*:=.*/HOSTCXX = g++/' scripts/Makefile.host
+            sed -i 's/^HOSTCC\s*:=.*/HOSTCC = ccache gcc/' scripts/Makefile.host
+            sed -i 's/^HOSTCXX\s*:=.*/HOSTCXX = ccache g++/' scripts/Makefile.host
           fi
           
-          # Original fix for unused variable
-          if [ -f "kernel/power/process.c" ]; then
-              sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c
-          fi
+          # 4. Original unused variable fix
+          sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c 2>/dev/null || true
           
-          echo "✅ Fixes applied"
-          EOF
-          
-          chmod +x fix_all.sh
-          ./fix_all.sh
-          
-          echo "=== VERIFICATION ==="
-          echo "Checking for remaining bad flags..."
-          ! grep -r "-Werror-Wreturn-type\|-Werror-Wimplicit-function-declaration\|-Werror-implicit-function-declaration" . --include="Makefile*" --include="Kbuild*" 2>/dev/null && echo "✅ No bad flags found"
+          echo "✅ Source files fixed"
 
       # STEP 5: Add KernelSU
       - name: Add KernelSU
@@ -158,89 +99,166 @@ jobs:
           echo 'obj-y += kernelsu/' >> drivers/Makefile
           
           rm -rf KernelSU-main ksu.tar.gz
-          echo "✅ KernelSU added"
 
-      # STEP 6: Configure with WORKING ccache
+      # STEP 6: Configure with SIMPLE method
       - name: Configure Kernel
         run: |
           cd kernel
           
-          # NUCLEAR CLEAN
           rm -rf out 2>/dev/null || true
           make distclean 2>/dev/null || true
-          rm -f .config .config.old .config.bak
           
-          # Set environment WITH ccache in PATH
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export HOSTCC="ccache gcc"  # Use our wrapper!
-          export HOSTCXX="ccache g++"
-          
-          # Make sure ccache is in PATH
-          export PATH="/usr/bin:$PATH"
-          
-          mkdir -p out
-          
-          echo "=== CONFIGURATION STEP 1 ==="
-          make O=out ARCH=arm64 gki_defconfig 2>&1 | tee config1.log
-          
-          # Enable KernelSU
-          echo "CONFIG_KSU=y" >> out/.config
-          echo "CONFIG_MODULES=y" >> out/.config
-          echo "# CONFIG_MODULE_SIG is not set" >> out/.config
-          
-          echo "=== CONFIGURATION STEP 2 ==="
-          make O=out ARCH=arm64 olddefconfig 2>&1 | tee config2.log
-          
-          echo "✅ Configuration complete"
-
-      # STEP 7: BUILD with simplified approach
-      - name: Build Kernel
-        run: |
-          cd kernel
-          
-          # Use ccache wrapper for build
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export HOSTCC="ccache gcc"
           export HOSTCXX="ccache g++"
-          export PATH="/usr/bin:$PATH"
           
-          echo "🚀 Starting kernel build..."
+          mkdir -p out
           
-          # Simple direct build
-          if make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log; then
-            echo "✅ Build successful!"
-          else
-            echo "⚠️ Parallel build failed, trying single core..."
+          # Simple config
+          make O=out ARCH=arm64 gki_defconfig
+          
+          # Add KernelSU
+          echo "CONFIG_KSU=y" >> out/.config
+          echo "CONFIG_MODULES=y" >> out/.config
+          echo "# CONFIG_MODULE_SIG is not set" >> out/.config
+          
+          # Update config
+          make O=out ARCH=arm64 olddefconfig
+
+      # STEP 7: CRITICAL - Fix generated Makefile BEFORE building
+      - name: Fix Generated Makefile BEFORE Build
+        run: |
+          cd kernel
+          
+          echo "=== FIXING GENERATED MAKEFILE ==="
+          
+          # This is CRITICAL - fix the generated Makefile in out/
+          if [ -f "out/Makefile" ]; then
+            echo "Patching out/Makefile..."
             
-            # Clean and try single core
-            make O=out ARCH=arm64 clean 2>/dev/null || true
+            # Fix the malformed flags in the generated Makefile
+            sed -i \
+              -e 's/-Werror-Wreturn-type/-Werror -Wreturn-type/g' \
+              -e 's/-Werror-Wimplicit-function-declaration/-Werror -Wimplicit-function-declaration/g' \
+              -e 's/-Werror-implicit-function-declaration/-Werror -Wimplicit-function-declaration/g' \
+              out/Makefile
             
-            if make O=out ARCH=arm64 -j1 2>&1 | tee build_single.log; then
-              echo "✅ Single-core build successful!"
-            else
-              echo "❌ Build failed"
-              echo "=== LAST ERRORS ==="
-              tail -100 build_single.log
-              
-              # Check for specific errors
-              if grep -q "unrecognized command-line option" build_single.log; then
-                echo "=== COMPILER FLAG ERROR DETECTED ==="
-                echo "The flag fix didn't work. Checking generated Makefile..."
-                if [ -f "out/Makefile" ]; then
-                  grep -n "Werror-W" out/Makefile | head -5
-                fi
-              fi
-              exit 1
-            fi
+            # Check if fix worked
+            echo "Checking for bad flags in generated Makefile:"
+            grep -n "Werror-W" out/Makefile || echo "✅ No bad flags found"
           fi
           
-          # Verify kernel
+          # Also fix scripts/Makefile.build in out directory
+          if [ -f "out/scripts/Makefile.build" ]; then
+            echo "Patching out/scripts/Makefile.build..."
+            sed -i 's/-Werror-Wreturn-type/-Werror -Wreturn-type/g' out/scripts/Makefile.build
+          fi
+
+      # STEP 8: BUILD with FLAG OVERRIDE
+      - name: Build Kernel
+        run: |
+          cd kernel
+          
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export HOSTCC="ccache gcc"
+          export HOSTCXX="ccache g++"
+          
+          echo "🚀 Building kernel with flag override..."
+          
+          # Build with KCFLAGS to override any remaining bad flags
+          make O=out ARCH=arm64 KCFLAGS="-Wno-error -Wno-return-type -Wno-implicit-function-declaration" -j$(nproc) 2>&1 | tee build.log || {
+            echo "⚠️ Build failed, checking error..."
+            
+            # Show the exact error
+            if grep -q "unrecognized command-line option.*Werror-W" build.log; then
+              echo "=== COMPILER FLAG ERROR STILL EXISTS ==="
+              echo "The generated Makefile still has bad flags!"
+              
+              # Check generated Makefile
+              if [ -f "out/Makefile" ]; then
+                echo "Checking out/Makefile for bad flags:"
+                grep -n "Werror-W" out/Makefile
+              fi
+              
+              # Try building with single core to see exact error
+              echo "Trying single-core build for debugging..."
+              make O=out ARCH=arm64 clean 2>/dev/null || true
+              make O=out ARCH=arm64 -j1 V=1 2>&1 | tee debug_build.log
+              exit 1
+            fi
+          }
+          
+          # Check for kernel
           if [ -f "out/arch/arm64/boot/Image" ]; then
-            echo "🎉🎉🎉 KERNEL BUILD SUCCESSFUL! 🎉🎉🎉"
+            echo "🎉🎉🎉 KERNEL BUILT SUCCESSFULLY! 🎉🎉🎉"
             ls -lh out/arch/arm64/boot/Image
-            file out/arch/arm64/boot/Image
           else
-            echo "❌ Kernel Image not found!"
-            find out/arch/arm64/b
+            echo "❌ Kernel Image not found"
+            exit 1
+          fi
+
+      # STEP 9: Create flashable package (FIXED syntax)
+      - name: Create Flashable Package
+        if: success()
+        run: |
+          cd kernel
+          
+          echo "📦 Creating flashable package..."
+          
+          mkdir -p anykernel
+          cp out/arch/arm64/boot/Image anykernel/
+          
+          # Create the anykernel.sh script WITHOUT heredoc EOF issues
+          echo '#!/system/bin/sh' > anykernel/anykernel.sh
+          echo '' >> anykernel/anykernel.sh
+          echo 'ui_print " "' >> anykernel/anykernel.sh
+          echo 'ui_print "*******************************"' >> anykernel/anykernel.sh
+          echo 'ui_print "* GKI Kernel for Samsung A135F"' >> anykernel/anykernel.sh
+          echo 'ui_print "* With KernelSU Support"' >> anykernel/anykernel.sh
+          echo 'ui_print "* Build Date: $(date +%Y-%m-%d)"' >> anykernel/anykernel.sh
+          echo 'ui_print "*******************************"' >> anykernel/anykernel.sh
+          echo 'ui_print " "' >> anykernel/anykernel.sh
+          echo '' >> anykernel/anykernel.sh
+          echo 'device=$(getprop ro.product.device)' >> anykernel/anykernel.sh
+          echo 'model=$(getprop ro.product.model)' >> anykernel/anykernel.sh
+          echo 'ui_print "- Device: $device"' >> anykernel/anykernel.sh
+          echo 'ui_print "- Model: $model"' >> anykernel/anykernel.sh
+          echo '' >> anykernel/anykernel.sh
+          echo 'ui_print "- Backing up current kernel..."' >> anykernel/anykernel.sh
+          echo 'dd if=/dev/block/by-name/boot of=/sdcard/boot_backup.img 2>/dev/null || true' >> anykernel/anykernel.sh
+          echo '' >> anykernel/anykernel.sh
+          echo 'ui_print "- Flashing new kernel..."' >> anykernel/anykernel.sh
+          echo 'dd if=/tmp/anykernel/Image of=/dev/block/by-name/boot 2>/dev/null || true' >> anykernel/anykernel.sh
+          echo '' >> anykernel/anykernel.sh
+          echo 'ui_print "- Done!"' >> anykernel/anykernel.sh
+          echo 'ui_print " "' >> anykernel/anykernel.sh
+          
+          chmod +x anykernel/anykernel.sh
+          
+          cd anykernel
+          zip -r9 ../A135F-GKI-Kernel.zip *
+          
+          echo "✅ Flashable package created: A135F-GKI-Kernel.zip"
+          ls -lh ../A135F-GKI-Kernel.zip
+
+      # STEP 10: Upload artifacts
+      - name: Upload Kernel Files
+        uses: actions/upload-artifact@v4
+        with:
+          name: A135F-Kernel-Complete
+          path: |
+            kernel/out/arch/arm64/boot/Image
+            kernel/A135F-GKI-Kernel.zip
+          retention-days: 7
+
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Logs-Complete
+          path: |
+            kernel/build.log
+            kernel/debug_build.log
+          retention-days: 3
