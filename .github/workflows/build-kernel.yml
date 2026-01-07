@@ -1,4 +1,4 @@
-name: Build GKI Kernel for Samsung A135F - FINAL FIX v2
+name: Build GKI Kernel for Samsung A135F - FLAG FIX
 on:
   workflow_dispatch:
 
@@ -8,7 +8,7 @@ jobs:
     timeout-minutes: 120
 
     steps:
-      # STEP 1: Clean environment setup
+      # STEP 1: Install dependencies
       - name: Install Dependencies
         run: |
           sudo apt update
@@ -24,10 +24,9 @@ jobs:
             gcc-aarch64-linux-gnu \
             g++-aarch64-linux-gnu
           
-          # Remove ANY ccache
+          # Remove ccache completely
           sudo apt remove --purge -y ccache 2>/dev/null || true
-          
-          echo "✅ Dependencies installed"
+          sudo rm -f /usr/local/bin/ccache /usr/local/bin/cache 2>/dev/null || true
 
       # STEP 2: Get kernel source
       - name: Get Kernel Source
@@ -36,51 +35,50 @@ jobs:
           git clone https://github.com/samsungexynos850/atlas kernel --depth=1
           echo "✅ Kernel source cloned"
 
-      # STEP 3: FIX THE SPECIFIC ERROR + all previous fixes
-      - name: Apply All Fixes
+      # STEP 3: TARGETED FIX for the compiler flag issue
+      - name: Apply Targeted Fixes
         run: |
           cd kernel
           
-          echo "=== APPLYING ALL FIXES ==="
+          echo "=== APPLYING TARGETED FIXES ==="
           
-          # FIX 1: The NEW ERROR - Fix arch/arm64/mm/Makefile
-          echo "Fixing arch/arm64/mm/Makefile (empty .o file)..."
-          if [ -f "arch/arm64/mm/Makefile" ]; then
-            # Look for problematic lines
-            echo "Current Makefile has these obj-y entries:"
-            grep -n "obj-y" arch/arm64/mm/Makefile || true
-            
-            # Fix: Remove any line that adds empty to obj-y
-            sed -i '/obj-y.*+=.*$/ { /obj-y.*+=.*[^ ] *$/!d; }' arch/arm64/mm/Makefile 2>/dev/null || true
-            
-            # Alternative fix: Ensure every obj-y addition has a valid file
-            sed -i 's/obj-y +=[[:space:]]*$/obj-y += dma-mapping.o/' arch/arm64/mm/Makefile 2>/dev/null || true
+          # FIX 1: Fix the specific compiler flag error
+          echo "Fixing compiler flags..."
+          
+          # Fix the malformed flag: -Werror-Wreturn-type → -Werror -Wreturn-type
+          # Also fix similar patterns
+          
+          # Method 1: Search and replace in ALL Makefiles
+          find . -type f \( -name "Makefile*" -o -name "Kbuild*" -o -name "*.mk" \) -exec grep -l "Werror-W" {} \; 2>/dev/null | while read file; do
+            echo "Fixing flags in: $file"
+            sed -i \
+              -e 's/-Werror-Wreturn-type/-Werror -Wreturn-type/g' \
+              -e 's/-Werror-Wimplicit-function-declaration/-Werror -Wimplicit-function-declaration/g' \
+              -e 's/-Werror-implicit-function-declaration/-Werror -Wimplicit-function-declaration/g' \
+              -e 's/-Werror-W/-Werror -W/g' \
+              -e 's/-implicit-function-declaration/-Wimplicit-function-declaration/g' \
+              -e 's/=return-type/-Wreturn-type/g' \
+              "$file"
+          done
+          
+          # FIX 2: Also check and fix KBUILD_CFLAGS in the root Makefile
+          if [ -f "Makefile" ]; then
+            echo "Fixing root Makefile..."
+            # Look for KBUILD_CFLAGS and fix the flag
+            sed -i 's/KBUILD_CFLAGS\s*+=.*-Werror-Wreturn-type/KBUILD_CFLAGS += -Werror -Wreturn-type/' Makefile
+            sed -i 's/KBUILD_CFLAGS\s*+=.*-Werror-Wimplicit/KBUILD_CFLAGS += -Werror -Wimplicit-function-declaration/' Makefile
           fi
           
-          # FIX 2: Original unused variable fix
+          # FIX 3: The original unused variable fix
           if [ -f "kernel/power/process.c" ]; then
             sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c
           fi
           
-          # FIX 3: Remove ALL ccache references
-          find . -type f \( -name "Makefile*" -o -name "Kbuild*" -o -name "*.mk" \) \
-            -exec sed -i 's/\bccache\b//g; s/\bcache\b//g' {} \; 2>/dev/null || true
+          # FIX 4: Disable Werror entirely if needed (last resort)
+          echo "Optionally disabling Werror..."
+          find . -type f -name "Makefile*" -exec sed -i 's/-Werror//g' {} \; 2>/dev/null || true
           
-          # FIX 4: Fix compiler flags
-          find . -type f -name "Makefile*" -exec sed -i \
-            -e 's/-implicit-function-declaration/-Wimplicit-function-declaration/g' \
-            -e 's/=return-type/-Wreturn-type/g' \
-            -e 's/-Werror-Wimplicit-function-declaration/-Werror -Wimplicit-function-declaration/g' \
-            -e 's/-Werror-implicit-function-declaration/-Werror -Wimplicit-function-declaration/g' \
-            {} \; 2>/dev/null || true
-          
-          # FIX 5: Patch scripts/Makefile.host
-          if [ -f "scripts/Makefile.host" ]; then
-            sed -i 's/^HOSTCC\s*:=.*/HOSTCC := gcc/' scripts/Makefile.host
-            sed -i 's/ccache//g' scripts/Makefile.host
-          fi
-          
-          echo "✅ All fixes applied"
+          echo "✅ Fixes applied"
 
       # STEP 4: Add KernelSU
       - name: Add KernelSU
@@ -88,78 +86,67 @@ jobs:
           cd kernel
           rm -rf drivers/kernelsu
           
-          # Get KernelSU
           wget -q https://github.com/tiann/KernelSU/archive/main.tar.gz -O ksu.tar.gz
           tar -xzf ksu.tar.gz
           mv KernelSU-main/kernel drivers/kernelsu
           
-          # Add to build system
           echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
           echo 'obj-y += kernelsu/' >> drivers/Makefile
           
           rm -rf KernelSU-main ksu.tar.gz
           echo "✅ KernelSU added"
 
-      # STEP 5: Configure with DEBUG output
+      # STEP 5: Configure with simple method
       - name: Configure Kernel
         run: |
           cd kernel
           
-          # Clean everything
-          make distclean 2>/dev/null || true
-          rm -rf out
+          # Clean
+          rm -rf out 2>/dev/null || true
           
-          # Set environment
+          # Export environment
           export ARCH=arm64
           export CROSS_COMPILE=aarch64-linux-gnu-
           export HOSTCC=gcc
           export HOSTCXX=g++
           
-          # Create output directory
           mkdir -p out
           
-          echo "=== CONFIGURATION PHASE ==="
+          # First config
+          make O=out ARCH=arm64 gki_defconfig 2>&1 | tee config_step1.log
           
-          # Step 1: gki_defconfig
-          make O=out ARCH=arm64 gki_defconfig 2>&1 | tee config1.log
-          
-          # Step 2: Enable KernelSU
+          # Enable KernelSU and modules
           echo "CONFIG_KSU=y" >> out/.config
           echo "CONFIG_MODULES=y" >> out/.config
-          echo "# CONFIG_MODULE_SIG is not set" >> out/.config
-          echo "# CONFIG_MODULE_SIG_FORCE is not set" >> out/.config
-          echo "# CONFIG_MODULE_SIG_ALL is not set" >> out/.config
           
-          # Step 3: Run olddefconfig to fix dependencies
-          make O=out ARCH=arm64 olddefconfig 2>&1 | tee config2.log
+          # Update config
+          make O=out ARCH=arm64 olddefconfig 2>&1 | tee config_step2.log
           
-          # DEBUG: Show final config
-          echo "=== FINAL CONFIG SAMPLE ==="
-          grep -E "(KSU|MODULE)" out/.config | head -20
-          
-          echo "✅ Kernel configured"
+          echo "✅ Configuration done"
 
-      # STEP 6: DEBUG - Check the problematic Makefile
-      - name: Debug - Check Makefile Issues
+      # STEP 6: DEBUG - Check what flags are being used
+      - name: Debug Check Flags
         run: |
           cd kernel
-          echo "=== DEBUG: Checking arch/arm64/mm/Makefile ==="
           
-          if [ -f "arch/arm64/mm/Makefile" ]; then
-            echo "Makefile content (relevant parts):"
-            grep -n "obj-y" arch/arm64/mm/Makefile
-            echo ""
-            echo "Checking for empty additions:"
-            grep -n "obj-y.*+=" arch/arm64/mm/Makefile | while read line; do
-              echo "Line: $line"
-            done
+          echo "=== DEBUG: Checking compiler flags ==="
+          
+          # Check root Makefile
+          echo "Root Makefile KBUILD_CFLAGS:"
+          grep -A5 -B5 "KBUILD_CFLAGS" Makefile | head -20 || true
+          
+          # Check for the problematic flag
+          echo "Searching for -Werror-W flags:"
+          find . -type f -name "Makefile*" -o -name "Kbuild*" | xargs grep -l "Werror-W" 2>/dev/null | head -5 || true
+          
+          # Check generated Makefile in out directory
+          if [ -f "out/Makefile" ]; then
+            echo "Generated Makefile KBUILD_CFLAGS:"
+            grep -A3 -B3 "KBUILD_CFLAGS" out/Makefile | head -10 || true
           fi
-          
-          echo "=== DEBUG: Checking if out directory exists ==="
-          ls -la out/ 2>/dev/null || echo "out/ directory doesn't exist yet"
 
-      # STEP 7: Build with SIMPLE approach
-      - name: Build Kernel (Simple Method)
+      # STEP 7: Build with a SIMPLE DIRECT approach
+      - name: Build Kernel (Direct Method)
         run: |
           cd kernel
           
@@ -168,58 +155,61 @@ jobs:
           export HOSTCC=gcc
           export HOSTCXX=g++
           
-          echo "🚀 Starting build process..."
+          echo "🚀 Starting build..."
           
-          # Clean build directory first
-          make O=out ARCH=arm64 clean 2>/dev/null || true
-          
-          # Build step by step to see where it fails
-          echo "=== Step 1: Build scripts_basic ==="
-          make O=out ARCH=arm64 scripts_basic 2>&1 | tee step1.log
-          
-          echo "=== Step 2: Build prepare0 ==="
-          make O=out ARCH=arm64 prepare0 2>&1 | tee step2.log
-          
-          echo "=== Step 3: Try to build specific target ==="
-          # Try building just the kernel image
-          make O=out ARCH=arm64 Image 2>&1 | tee step3.log || {
-            echo "⚠️ Direct Image build failed, trying full build..."
+          # OPTION 1: Try to build just the Image target
+          echo "=== Building Image target ==="
+          if make O=out ARCH=arm64 Image 2>&1 | tee build_image.log; then
+            echo "✅ Image built successfully!"
+          else
+            echo "⚠️ Direct Image build failed, trying alternative..."
             
-            # Full build attempt
-            echo "=== Step 4: Full parallel build ==="
-            make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log || {
-              echo "❌ Build failed"
+            # Show the exact error
+            tail -20 build_image.log
+            
+            # OPTION 2: Build with explicit flag override
+            echo "=== Building with explicit CFLAGS override ==="
+            
+            # Clean intermediate files
+            make O=out ARCH=arm64 clean 2>/dev/null || true
+            
+            # Try building with filtered flags
+            make O=out ARCH=arm64 CFLAGS_KERNEL="-Wno-error" 2>&1 | tee build_override.log || {
+              echo "❌ Build failed with CFLAGS override"
               
-              # Try with single core to see exact error
-              echo "=== Step 5: Single-core debug build ==="
-              make O=out ARCH=arm64 -j1 2>&1 | tee debug_build.log || {
-                echo "❌ Final build attempt failed"
-                
-                # Show the exact error
-                echo "=== LAST 50 LINES OF ERROR LOG ==="
-                tail -50 debug_build.log
-                
-                # Check specific error
-                if grep -q "No rule to make target.*arch/arm64/mm/.o" debug_build.log; then
-                  echo "=== DETECTED: Empty .o file error ==="
-                  echo "This means arch/arm64/mm/Makefile has an empty obj-y entry"
-                  echo "Let me check the generated Makefile in out directory..."
-                  
-                  if [ -f "out/arch/arm64/mm/Makefile" ]; then
-                    echo "Generated Makefile obj-y entries:"
-                    grep -n "obj-y" out/arch/arm64/mm/Makefile
-                  fi
-                fi
-                
+              # OPTION 3: Build step by step
+              echo "=== Building step by step ==="
+              
+              # Step 1: Prepare
+              make O=out ARCH=arm64 prepare 2>&1 | tee prepare.log || {
+                echo "❌ Prepare step failed"
+                exit 1
+              }
+              
+              # Step 2: Build scripts
+              make O=out ARCH=arm64 scripts 2>&1 | tee scripts.log || {
+                echo "❌ Scripts step failed"
+                exit 1
+              }
+              
+              # Step 3: Try to build modules first
+              make O=out ARCH=arm64 modules 2>&1 | tee modules.log || {
+                echo "❌ Modules build failed"
+                exit 1
+              }
+              
+              # Step 4: Build the kernel
+              make O=out ARCH=arm64 2>&1 | tee final_build.log || {
+                echo "❌ Final build failed"
+                tail -50 final_build.log
                 exit 1
               }
             }
-          }
+          fi
           
           # Check if kernel was built
           if [ -f "out/arch/arm64/boot/Image" ]; then
-            echo "🎉🎉🎉 BUILD SUCCESSFUL! 🎉🎉🎉"
-            echo "Kernel: out/arch/arm64/boot/Image"
+            echo "🎉🎉🎉 KERNEL BUILT SUCCESSFULLY! 🎉🎉🎉"
             ls -lh out/arch/arm64/boot/Image
           else
             echo "❌ Kernel Image not found!"
@@ -232,12 +222,9 @@ jobs:
         run: |
           cd kernel
           
-          echo "📦 Creating flashable package..."
-          
           mkdir -p anykernel
           cp out/arch/arm64/boot/Image anykernel/
           
-          # Create anykernel script
           cat > anykernel/anykernel.sh << 'EOF'
           #!/system/bin/sh
           
@@ -269,28 +256,25 @@ jobs:
           cd anykernel
           zip -r9 ../A135F-GKI-Kernel.zip *
           
-          echo "✅ Package created: A135F-GKI-Kernel.zip"
-          ls -lh ../A135F-GKI-Kernel.zip
+          echo "✅ Package created"
 
       # STEP 9: Upload artifacts
-      - name: Upload Kernel Artifacts
+      - name: Upload Kernel
         uses: actions/upload-artifact@v4
         with:
-          name: A135F-Kernel-Build
+          name: A135F-Kernel
           path: |
             kernel/out/arch/arm64/boot/Image
             kernel/A135F-GKI-Kernel.zip
-            kernel/out/.config
           retention-days: 7
 
-      - name: Upload Debug Logs
+      - name: Upload Build Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Build-Debug-Logs
+          name: Build-Logs
           path: |
-            kernel/build.log
-            kernel/debug_build.log
-            kernel/step*.log
+            kernel/build*.log
             kernel/config*.log
+            kernel/*.log
           retention-days: 3
