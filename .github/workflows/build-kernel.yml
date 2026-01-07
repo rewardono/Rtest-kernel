@@ -1,198 +1,76 @@
 name: Build GKI Kernel for A135F
 on:
   workflow_dispatch:
+    inputs:
+      clean_build:
+        description: 'Clean build (takes longer)'
+        required: false
+        default: 'false'
 jobs:
   build:
-    runs-on: ubuntu-linux-latest
+    runs-on: ubuntu-22.04  # Use specific version instead of latest
+    timeout-minutes: 60  # Timeout after 60 minutes
+    
     steps:
-      - name: Free Disk Space
-        uses: jlumbroso/free-disk-space@main
+      - name: Checkout code
+        uses: actions/checkout@v4
       
-      - name: Install Dependencies
+      - name: Install Dependencies (Minimum)
         run: |
-          sudo apt update
-          sudo apt install -y git-core flex bison build-essential libssl-dev clang llvm lld bc libelf-dev ccache
-          sudo apt install -y gcc-aarch64-linux-gnu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            git \
+            gcc-aarch64-linux-gnu
+          # Clean apt cache to save space
+          sudo apt-get clean
+          sudo rm -rf /var/lib/apt/lists/*
       
-      - name: Clone Source
+      - name: Clone Kernel Source (Shallow)
         run: |
-          git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+          git clone --depth=1 --single-branch \
+            https://github.com/samsungexynos850/atlas kernel
       
-      - name: Manual KernelSU Integration
+      - name: Add KernelSU (Minimal)
         run: |
           cd kernel
-          rm -rf drivers/kernelsu
-          git clone https://github.com/tiann/KernelSU ksu_tmp --depth=1
+          git clone --depth=1 https://github.com/tiann/KernelSU ksu_tmp
           mv ksu_tmp/kernel drivers/kernelsu
-          
-          # For GKI builds, KernelSU needs additional configuration
-          echo "=== KernelSU GKI Info ==="
-          cat drivers/kernelsu/README.md | grep -i gki || true
-          
-          sed -i '1i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
-          sed -i '1i obj-y += kernelsu/' drivers/Makefile
+          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          echo 'obj-y += kernelsu/' >> drivers/Makefile
           rm -rf ksu_tmp
       
-      - name: Build GKI Kernel
+      - name: Build Kernel
         run: |
           cd kernel
           export ARCH=arm64
-          export LLVM=1
           export CROSS_COMPILE=aarch64-linux-gnu-
-          export PATH="/usr/lib/ccache:$PATH"
+          
+          # Disable ccache to save space
+          export USE_CCACHE=0
           
           mkdir -p out
           
-          # Use GKI defconfig
-          echo "Building with GKI defconfig..."
-          make O=out ARCH=arm64 gki_defconfig
+          # Build with minimal output
+          echo "Configuring kernel..."
+          make O=out ARCH=arm64 gki_defconfig > /dev/null 2>&1
           
-          # For GKI, we need to ensure proper configuration
-          # First, let's see what GKI options are available
-          echo "=== Current GKI-related configs ==="
-          grep -i "gki\|modules" out/.config | head -20 || true
+          # Enable KSU
+          sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config
+          sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' out/.config
           
-          # Check if scripts/config exists
-          if [ -f "./scripts/config" ]; then
-            echo "Using scripts/config to modify config"
-            
-            # Enable KernelSU
-            ./scripts/config --file out/.config --enable KSU
-            
-            # GKI specific: Enable module support (required for GKI)
-            ./scripts/config --file out/.config --enable MODULES
-            ./scripts/config --file out/.config --disable MODULE_SIG
-            ./scripts/config --file out/.config --disable MODULE_SIG_FORCE
-            ./scripts/config --file out/.config --enable MODULE_COMPRESS_NONE
-            
-            # Enable KPROBES for KernelSU (if needed)
-            ./scripts/config --file out/.config --enable KPROBES
-            ./scripts/config --file out/.config --enable HAVE_KPROBES
-            ./scripts/config --file out/.config --enable KPROBES_ON_FTRACE
-            
-            # Enable OVERLAY_FS for KernelSU (recommended)
-            ./scripts/config --file out/.config --enable OVERLAY_FS
-            
-          else
-            echo "scripts/config not found, editing .config manually"
-            # Enable KernelSU
-            sed -i 's/# CONFIG_KSU is not set/CONFIG_KSU=y/' out/.config
-            
-            # GKI requires module support
-            sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/' out/.config
-            sed -i 's/CONFIG_MODULE_SIG=y/# CONFIG_MODULE_SIG is not set/' out/.config
-            sed -i 's/CONFIG_MODULE_SIG_FORCE=y/# CONFIG_MODULE_SIG_FORCE is not set/' out/.config
-            
-            # Enable KPROBES
-            sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/' out/.config
-            sed -i 's/# CONFIG_HAVE_KPROBES is not set/CONFIG_HAVE_KPROBES=y/' out/.config
-            sed -i 's/# CONFIG_KPROBES_ON_FTRACE is not set/CONFIG_KPROBES_ON_FTRACE=y/' out/.config
-            
-            # Enable OVERLAY_FS
-            sed -i 's/# CONFIG_OVERLAY_FS is not set/CONFIG_OVERLAY_FS=y/' out/.config
-          fi
-          
-          # Save the final config for reference
-          cp out/.config out/final_config
-          
-          # Show important configs
-          echo "=== Final important configs ==="
-          grep -E "KSU|MODULE|GKI|KPROBE|OVERLAY" out/.config || true
-          
-          # Build the GKI kernel
-          echo "Starting GKI kernel build..."
-          make O=out ARCH=arm64 -j$(nproc --all) 2>&1 | tee build.log
+          echo "Building kernel (this may take a while)..."
+          make O=out ARCH=arm64 -j2 2>&1 | tail -100
       
-      - name: Check Build Output
-        run: |
-          cd kernel
-          echo "=== Checking build artifacts ==="
-          
-          if [ -f "out/arch/arm64/boot/Image" ]; then
-            echo "✓ Kernel Image found!"
-            ls -lh out/arch/arm64/boot/Image
-            
-            # Check for GKI specific files
-            echo "=== Looking for GKI modules ==="
-            find out -name "*.ko" | head -10 || echo "No modules found"
-            
-            # Check if Image.gz exists (common for GKI)
-            if [ -f "out/arch/arm64/boot/Image.gz" ]; then
-              echo "✓ GZIpped Image found (common for GKI)"
-              ls -lh out/arch/arm64/boot/Image.gz
-            fi
-            
-          else
-            echo "✗ Kernel build might have failed"
-            echo "=== Last 100 lines of build log ==="
-            tail -100 build.log
-            
-            echo "=== Checking for common errors ==="
-            grep -i "error\|fail" build.log | tail -20 || true
-          fi
-      
-      - name: Upload All Artifacts
+      - name: Upload Kernel
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: A135F-GKI-Kernel
-          path: |
-            kernel/out/arch/arm64/boot/
-            kernel/out/.config
-            kernel/out/final_config
-            kernel/build.log
-          retention-days: 7
-      
-      - name: Create Flashable Package
-        run: |
-          cd kernel
-          # Create a simple anykernel3 style package
-          mkdir -p anykernel
-          
-          # Copy kernel Image
-          cp out/arch/arm64/boot/Image anykernel/
-          
-          # Create basic anykernel script
-          cat > anykernel/anykernel.sh << 'EOF'
-          #!/system/bin/sh
-          # AnyKernel3 Ramdisk Mod Script
-          # osm0sis @ xda-developers
-          
-          ## AnyKernel setup
-          # begin properties
-          properties() {
-            kernel.string=GKI Kernel for A135F
-            do.devicecheck=1
-            do.modules=0
-            do.systemless=1
-            do.cleanup=1
-            do.cleanuponabort=0
-            device.name1=a13
-            device.name2=a135f
-          }
-          
-          ## AnyKernel methods (DO NOT CHANGE)
-          # import patching functions/variables - see for reference
-          . tools/ak3-core.sh;
-          
-          ## AnyKernel install
-          dump_boot;
-          
-          write_boot;
-          ## end install
-          EOF
-          
-          chmod +x anykernel/anykernel.sh
-          
-          # Create zip
-          cd anykernel
-          zip -r9 ../A135F-GKI-Kernel.zip *
-          
-          echo "Flashable zip created"
-          ls -lh ../A135F-GKI-Kernel.zip
-      
-      - name: Upload Flashable Zip
-        uses: actions/upload-artifact@v4
-        with:
-          name: A135F-GKI-Flashable
-          path: kernel/A135F-GKI-Kernel.zip
-          retention-days: 7
+          name: kernel-image
+          path: kernel/out/arch/arm64/boot/Image
+          retention-days: 1  # Keep only 1 day to save space
