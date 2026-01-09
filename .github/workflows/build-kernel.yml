@@ -1,4 +1,4 @@
-name: Build Kernel - Complete Fixes v2
+name: Build GKI-like Kernel for A135F
 on:
   workflow_dispatch:
 
@@ -11,123 +11,55 @@ jobs:
     - name: Setup Environment
       run: |
         sudo apt update
-        sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3 ccache
-        sudo ln -s /usr/bin/ccache /usr/local/bin/ccache || true
+        sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget \
+          gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3 ccache
 
     - name: Get Kernel Source
       run: |
-        rm -rf kernel
         git clone https://github.com/samsungexynos850/atlas kernel --depth=1
 
-    - name: Apply Comprehensive Fixes
+    - name: Apply Critical Fixes
       run: |
         cd kernel
-        
-        echo "=== Applying all necessary fixes ==="
-        
-        # 1. Fix bpf_trace.c - remove 'inline' from variable argument function
-        echo "Fixing bpf_trace.c..."
-        sed -i 's/static inline __printf(1, 0) int bpf_do_trace_printk/static __printf(1, 0) int bpf_do_trace_printk/' kernel/trace/bpf_trace.c 2>/dev/null || true
-        # Alternative approach: change to noinline
-        sed -i 's/static inline __printf(1, 0)/static __noinline __printf(1, 0)/' kernel/trace/bpf_trace.c 2>/dev/null || true
-        
-        # 2. Fix sec_debug.h
-        echo "Fixing sec_debug.h..."
-        sed -i 's|#define secdbg_exin_get_unfz(.*).*|#define secdbg_exin_get_unfz(a) ("")|' include/linux/sec_debug.h 2>/dev/null || true
-        
-        # 3. Fix EMS header conflicts - COMPLETE SOLUTION
-        echo "Fixing EMS headers..."
-        if [ -f "include/linux/ems.h" ]; then
-          # Check what's actually in the file
-          EMS_LINE=$(grep -n "lb_cfs_tasks" include/linux/ems.h | head -1 | cut -d: -f1)
-          if [ ! -z "$EMS_LINE" ]; then
-            # Get the exact line and fix it
-            sed -i "${EMS_LINE}s/.*/extern struct list_head *lb_cfs_tasks(struct rq *rq, int sse);/" include/linux/ems.h
-          fi
-        fi
-        
-        # 4. Fix lb_cfs_tasks implementation in load_balance.c
-        echo "Fixing load_balance.c..."
-        if [ -f "kernel/sched/ems/load_balance.c" ]; then
-          # Match the header declaration
-          sed -i 's/struct list_head \*lb_cfs_tasks(struct rq \*rq, struct sched_entity \*se)/struct list_head *lb_cfs_tasks(struct rq *rq, int sse)/' kernel/sched/ems/load_balance.c 2>/dev/null || true
-        fi
-        
-        # 5. Fix lb_cfs_tasks in fair.c - REMOVE our added function
-        echo "Fixing fair.c..."
-        if [ -f "kernel/sched/fair.c" ]; then
-          # Remove the problematic line we added
-          sed -i '/static inline struct list_head \*lb_cfs_tasks.*{ return \&rq->cfs_tasks; }/d' kernel/sched/fair.c 2>/dev/null || true
-        fi
-        
-        # 6. Fix need_memory_boosting COMPLETELY
-        echo "Fixing need_memory_boosting..."
-        # First, make sure we have the right declaration in mm.h
-        if grep -q "need_memory_boosting" include/linux/mm.h 2>/dev/null; then
-          sed -i '/need_memory_boosting/s/.*/#ifndef need_memory_boosting\nstatic inline bool need_memory_boosting(void) { return false; }\n#endif/' include/linux/mm.h 2>/dev/null || true
-        else
-          # Add it if not present
-          echo -e "\n#ifndef need_memory_boothing\nstatic inline bool need_memory_boosting(void) { return false; }\n#endif" >> include/linux/mm.h
-        fi
-        
-        # Then comment out the definition in vmscan.c
-        if [ -f "mm/vmscan.c" ]; then
-          # Find the function and comment it out
-          sed -i '/^inline bool need_memory_boosting(void)/,/^}/s/^/\/\//' mm/vmscan.c 2>/dev/null || true
-          # Alternative: rename it to avoid conflict
-          sed -i 's/^inline bool need_memory_boosting(void)/static inline bool __need_memory_boosting(void)/' mm/vmscan.c 2>/dev/null || true
-        fi
-        
-        # 7. Fix compiler warnings
-        echo "Fixing compiler flags..."
-        find . -type f -name "Makefile*" -exec sed -i \
-          -e 's/-Werror-/-Wno-error -W/g' \
-          -e 's/-Werror=/-Wno-error -W/g' \
-          -e 's/-Werror\b//g' \
-          {} \; 2>/dev/null || true
-        
-        # 8. Fix process.c unused variable
-        sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused *sys_state[SYSTEM_END] = {/' kernel/power/process.c 2>/dev/null || true
-        
-        # 9. Fix systrace_mark.h
-        sed -i 's|systrace_mark_end()\s*__systrace_mark(SYSTRACE_MARK_TYPE_END, "")|systrace_mark_end()    __systrace_mark(SYSTRACE_MARK_TYPE_END, "end")|' include/trace/systrace_mark.h 2>/dev/null || true
-        
-        # 10. FIX: Watchdog.c - remove Samsung-specific softlockup detector code
-        echo "Fixing watchdog.c softlockup errors..."
+
+        # === Fix watchdog.c: remove entire Samsung softlockup block ===
         if [ -f "kernel/watchdog.c" ]; then
-          # Backup the file first
-          cp kernel/watchdog.c kernel/watchdog.c.backup
-          
-          # Comment out the entire check_softlockup_type function (lines around 635)
-          awk '/static void check_softlockup_type/,/^}/ {print "//" $0; next} {print}' kernel/watchdog.c > kernel/watchdog.c.tmp && mv kernel/watchdog.c.tmp kernel/watchdog.c
-          
-          # Also comment out the call to check_softlockup_type
-          sed -i 's/check_softlockup_type(cpu);//g' kernel/watchdog.c 2>/dev/null || true
-          
-          # Remove references to percpu_sl_info
-          sed -i '/percpu_sl_info/d' kernel/watchdog.c 2>/dev/null || true
+          echo "Fixing watchdog.c: removing Samsung softlockup code..."
+          sed -i '/^#ifdef CONFIG_SOFTLOCKUP_DETECTOR$/,/^#endif$/d' kernel/watchdog.c
+          sed -i '/percpu_sl_info\|sl_to_name\|check_softlockup_type/d' kernel/watchdog.c
         fi
-        
-        # 11. FIX: Samsung BTS driver - fix missing types.h
-        echo "Fixing BTS driver missing types.h..."
-        if [ -f "drivers/soc/samsung/cal-if/pwrcal-env.h" ]; then
-          # Fix the include path
-          sed -i 's|#include "types.h"|#include <linux/types.h>|' drivers/soc/samsung/cal-if/pwrcal-env.h 2>/dev/null || true
-        fi
-        
-        # 12. FIX: Add missing softlockup_info forward declaration if needed
-        if grep -q "struct softlockup_info" kernel/watchdog.c 2>/dev/null; then
-          echo "Adding forward declaration for softlockup_info..."
-          # Add forward declaration at the beginning of watchdog.c
-          sed -i '/#include <linux\/srcu.h>/a struct softlockup_info;' kernel/watchdog.c 2>/dev/null || true
-        fi
-        
-        echo "✅ All fixes applied"
+
+        # === Fix need_memory_boosting ===
+        echo '#ifndef need_memory_boosting
+static inline bool need_memory_boosting(void) { return false; }
+#endif' >> include/linux/mm.h
+
+        # === Remove problematic Samsung subsystems entirely ===
+        rm -rf \
+          kernel/sched/ems/ \
+          drivers/soc/samsung/bts/ \
+          drivers/staging/sec_debug/ \
+          kernel/trace/sec/
+
+        # === Stub any lingering includes ===
+        find . -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i \
+          -e 's|#include ".*ems/.*"|// REMOVED EMS|g' \
+          -e 's|#include <linux/ems.h>|// REMOVED EMS|g' \
+          -e 's|#include ".*bts.*"|// REMOVED BTS|g' \
+          {} \;
+
+        # === Fix systrace_mark.h ===
+        sed -i 's|systrace_mark_end()\s*__systrace_mark(SYSTRACE_MARK_TYPE_END, "")|systrace_mark_end() __systrace_mark(SYSTRACE_MARK_TYPE_END, "end")|' include/trace/systrace_mark.h 2>/dev/null || true
+
+        # === Fix process.c unused variable ===
+        sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused *sys_state[SYSTEM_END] = {/' kernel/power/process.c 2>/dev/null || true
+
+        # === Fix bpf_trace.c inline issue ===
+        sed -i 's/static inline __printf(1, 0)/static __noinline __printf(1, 0)/' kernel/trace/bpf_trace.c 2>/dev/null || true
 
     - name: Add KernelSU
       run: |
         cd kernel
-        rm -rf drivers/kernelsu
         git clone https://github.com/tiann/KernelSU ksu_tmp --depth=1
         mv ksu_tmp/kernel drivers/kernelsu
         echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
@@ -137,39 +69,40 @@ jobs:
     - name: Configure Kernel
       run: |
         cd kernel
-        rm -rf out
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        
         mkdir -p out
-        # Use gki_defconfig for GKI build
-        make O=out ARCH=arm64 gki_defconfig
-        
-        # FIX: Make sure scripts/config is executable
+
+        # Use defconfig since gki_defconfig DOES NOT EXIST in this tree
+        make O=out ARCH=arm64 defconfig
+
         chmod +x scripts/config
-        
-        # Enable KernelSU and disable module signing
+
+        # Enable KernelSU
         ./scripts/config --file out/.config --enable KSU
-        ./scripts/config --file out/.config --set-str KSU_GIT_VERSION "github-action-build"
+        ./scripts/config --file out/.config --set-str KSU_GIT_VERSION "gh-action"
+
+        # Disable module signing
         ./scripts/config --file out/.config --disable MODULE_SIG
         ./scripts/config --file out/.config --disable MODULE_SIG_ALL
         ./scripts/config --file out/.config --disable MODULE_SIG_FORCE
-        
-        # Disable problematic Samsung debug features
+
+        # Aggressively disable Samsung debug & scheduler features
         ./scripts/config --file out/.config --disable SEC_DEBUG
         ./scripts/config --file out/.config --disable SEC_DEBUG_EXTRA_INFO
-        
-        # NEW: Disable BTS driver to avoid compilation issues
         ./scripts/config --file out/.config --disable EXYNOS_BTS
-        
-        # NEW: Disable Samsung watchdog extensions
+        ./scripts/config --file out/.config --disable SCHED_EMS
         ./scripts/config --file out/.config --disable SOFTLOCKUP_DETECTOR_EXTENSION
-        
-        # NEW: Disable any remaining problematic Samsung features
         ./scripts/config --file out/.config --disable SEC_DEBUG_HARDLOCKUP_DETECTOR
         ./scripts/config --file out/.config --disable SEC_DEBUG_SOFTLOCKUP_DETECTOR
         ./scripts/config --file out/.config --disable SEC_DEBUG_WATCHDOG
-        
+
+        # Fix devfreq error: disable broken governor
+        ./scripts/config --file out/.config --disable DEVFREQ_GOV_SIMPLE_ONDEMAND
+
+        # Enforce GKI-like setting (optional but recommended)
+        echo "CONFIG_GKI_KERNEL=y" >> out/.config
+
         make O=out ARCH=arm64 olddefconfig
 
     - name: Build Kernel
@@ -177,134 +110,76 @@ jobs:
         cd kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        export KCFLAGS="-w -Wno-error -Wno-error=attribute-alias -Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types"
-        
+        export KCFLAGS="-w -Wno-error -Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types"
+
         echo "🚀 Starting kernel build..."
-        
-        # Try parallel build first
+
         if make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log; then
-          echo "✅ Parallel build successful!"
+          echo "✅ Build succeeded!"
         else
-          echo "⚠️ Parallel build failed, checking for specific errors..."
-          
-          # Show error summary
-          echo "=== BUILD ERROR SUMMARY ==="
-          grep -i "error:" build.log | head -20
-          
-          echo "⚠️ Trying single-core build..."
-          make O=out ARCH=arm64 clean 2>/dev/null || true
-          
-          if make O=out ARCH=arm64 -j1 2>&1 | tee build_single.log; then
-            echo "✅ Single-core build successful!"
-          else
-            echo "❌ Build failed with single core"
-            echo "=== LAST 50 LINES OF ERRORS ==="
-            tail -50 build_single.log | grep -i "error:" || tail -50 build_single.log
-            
-            # Try to fix remaining issues dynamically
-            echo "🛠️ Attempting emergency fixes..."
-            
-            # Fix watchdog.c more aggressively if still failing
-            if grep -q "percpu_sl_info" build_single.log 2>/dev/null; then
-              echo "Applying emergency watchdog.c fix..."
-              awk '/static void check_softlockup_type/,/^}/ {next} {print}' kernel/watchdog.c > kernel/watchdog.c.fixed && mv kernel/watchdog.c.fixed kernel/watchdog.c
-              sed -i '/percpu_sl_info/d' kernel/watchdog.c 2>/dev/null || true
-              sed -i '/sl_to_name/d' kernel/watchdog.c 2>/dev/null || true
-            fi
-            
-            # Try one more build attempt
-            echo "🔄 One more build attempt after emergency fixes..."
-            if make O=out ARCH=arm64 -j1 2>&1 | tee build_final.log; then
-              echo "✅ Emergency fixes successful!"
-            else
-              echo "❌ Final build attempt failed"
-              exit 1
-            fi
-          fi
-        fi
-        
-        # Verify kernel image exists
-        if [ -f "out/arch/arm64/boot/Image" ]; then
-          echo "🎉🎉🎉 KERNEL BUILD SUCCESSFUL! 🎉🎉🎉"
-          ls -lh out/arch/arm64/boot/Image
-          echo "Size: $(wc -c < out/arch/arm64/boot/Image) bytes"
-        else
-          echo "❌ Kernel Image not found!"
-          echo "Checking for alternative output..."
-          find out -name "Image" -o -name "Image.gz" | head -10
+          echo "❌ Build failed"
+          grep -A10 -B5 -i "error:" build.log || tail -50 build.log
           exit 1
         fi
+
+        if [ ! -f "out/arch/arm64/boot/Image" ]; then
+          echo "❌ Kernel Image not found!"
+          find out -name "Image*" | head -10
+          exit 1
+        fi
+
+        echo "🎉 KERNEL BUILT SUCCESSFULLY"
+        ls -lh out/arch/arm64/boot/Image
 
     - name: Create AnyKernel3 Package
       if: success()
       run: |
         cd kernel
-        # Download AnyKernel3 template
-        wget -q https://github.com/osm0sis/AnyKernel3/archive/master.zip -O anykernel.zip
-        unzip -q anykernel.zip -d anykernel_temp
-        mv anykernel_temp/AnyKernel3-master anykernel
-        rm -rf anykernel_temp anykernel.zip
-        
-        # Copy kernel image
+        wget -q https://github.com/osm0sis/AnyKernel3/archive/master.zip -O ak3.zip
+        unzip -q ak3.zip
+        mv AnyKernel3-master anykernel
+        rm -rf ak3.zip
+
         cp out/arch/arm64/boot/Image anykernel/
-        
-        # Create basic anykernel script
+
         cat > anykernel/anykernel.sh << 'EOF'
-        #!/system/bin/sh
-        # AnyKernel3 Ramdisk Mod Script
-        # osm0sis @ xda-developers
-        
-        ## AnyKernel setup
-        # begin properties
-        properties() {
-        kernel.string=Atlas-GKI-Kernel
-        do.devicecheck=1
-        do.modules=0
-        do.systemless=1
-        do.cleanup=1
-        do.cleanuponabort=0
-        device.name1=a13
-        device.name2=a135f
-        device.name3=exynos850
-        }
-        
-        # shell variables
-        block=/dev/block/by-name/boot;
-        is_slot_device=0;
-        ramdisk_compression=auto;
-        
-        ## AnyKernel methods (DO NOT CHANGE)
-        # import patching functions/variables - see for reference
-        . tools/ak3-core.sh;
-        
-        ## AnyKernel install
-        dump_boot;
-        
-        write_boot;
-        ## end install
-        EOF
-        
+#!/system/bin/sh
+# AnyKernel3 Ramdisk Mod Script
+properties() {
+kernel.string=Atlas-GKI-Kernel
+do.devicecheck=1
+do.modules=0
+do.systemless=1
+do.cleanup=1
+device.name1=a13
+device.name2=a135f
+device.name3=SM-A135F
+}
+block=/dev/block/by-name/boot;
+is_slot_device=0;
+ramdisk_compression=auto;
+. tools/ak3-core.sh;
+dump_boot;
+write_boot;
+EOF
+
         chmod +x anykernel/anykernel.sh
-        
-        # Create zip
         cd anykernel
         zip -r9 ../Atlas-GKI-Kernel-$(date +%Y%m%d).zip .
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build
+        name: kernel-artifacts
         path: |
           kernel/out/arch/arm64/boot/Image
           kernel/Atlas-GKI-Kernel-*.zip
 
-    - name: Upload Build Logs
+    - name: Upload Logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
         name: build-logs
         path: |
           kernel/build.log
-          kernel/build_single.log
-          kernel/build_final.log
           kernel/out/.config
