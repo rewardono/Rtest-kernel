@@ -1,4 +1,4 @@
-name: Build Kernel - Complete Fixes v3
+name: Build Kernel - Complete Fixes v4
 on:
   workflow_dispatch:
 jobs:
@@ -135,6 +135,52 @@ jobs:
           # If needed, declare dfso_multiplication_weight as 1 (fallback)
           sed -i '/unsigned long dfso_multiplication_weight;/a unsigned long dfso_multiplication_weight = 1;' drivers/devfreq/governor_simpleondemand.c 2>/dev/null || true
         fi
+
+        # 14. NEW FIX: Input booster - remove or comment out problematic macros and functions
+        echo "Fixing input_booster in input.c..."
+        if [ -f "drivers/input/input.c" ]; then
+          # Backup file
+          cp drivers/input/input.c drivers/input/input.c.backup
+          
+          # Remove DECLARE_SET_BOOSTER_FUNC lines
+          sed -i '/DECLARE_SET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
+          
+          # Remove DECLARE_RESET_BOOSTER_FUNC lines
+          sed -i '/DECLARE_RESET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
+          
+          # Comment out input_booster_init function
+          sed -i '/void input_booster_init(void)/,/^}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          
+          # Comment out input_booster_idle_state and press_state
+          sed -i '/input_booster_idle_state/,/^}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          sed -i '/input_booster_press_state/,/^}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          
+          # Comment out reset work functions
+          sed -i '/_reset_booster_work_func/,/^}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          
+          # Comment out emstune related
+          sed -i '/input_emstune_init/,/^}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          sed -i '/INIT_INPUT_EMSTUNE/d' drivers/input/input.c 2>/dev/null || true
+          
+          # Remove calls to input_booster functions in other parts
+          sed -i 's/input_booster_.*();//g' drivers/input/input.c 2>/dev/null || true
+          
+          # Fix syntax in macros if needed (fallback)
+          sed -i '/head_time/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/tail_time/d' drivers/input/input.c 2>/dev/null || true
+          
+          # Remove includes if causing issues
+          sed -i '/#include <linux\/input\/input_booster.h>/d' drivers/input/input.c 2>/dev/null || true
+        fi
+        
+        # Fix header if needed
+        if [ -f "include/linux/input/input_booster.h" ]; then
+          # Comment out problematic macro definitions
+          sed -i '/#define SET_BOOSTER/,/#endif/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/#define REMOVE_BOOSTER/,/#endif/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/CHANGE_BOOSTER/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/INIT_BOOSTER/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+        fi
         
         echo "✅ All fixes applied"
     - name: Add KernelSU
@@ -184,6 +230,13 @@ jobs:
         ./scripts/config --file out/.config --disable SEC_DEBUG_SOFTLOCKUP_DETECTOR
         ./scripts/config --file out/.config --disable SEC_DEBUG_WATCHDOG
         
+        # NEW FIX: Disable input booster and EMS to avoid vendor-specific errors
+        ./scripts/config --file out/.config --disable INPUT_BOOSTER
+        ./scripts/config --file out/.config --disable SEC_INPUT_BOOSTER  # Alternative name if exists
+        ./scripts/config --file out/.config --disable EMS
+        ./scripts/config --file out/.config --disable EMSTUNE
+        ./scripts/config --file out/.config --disable EMS_TUNE
+        
         make O=out ARCH=arm64 olddefconfig
     - name: Build Kernel
       run: |
@@ -227,6 +280,19 @@ jobs:
             if grep -q "multiplication_weight" build_single.log 2>/dev/null; then
               echo "Applying emergency devfreq fix..."
               sed -i '/multiplication_weight/d' drivers/devfreq/governor_simpleondemand.c 2>/dev/null || true
+            fi
+            
+            # NEW: Emergency fix for input_booster if still error
+            if grep -q "input_booster" build_single.log 2>/dev/null; then
+              echo "Applying emergency input_booster fix..."
+              sed -i '/#include <linux\/input\/input_booster.h>/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/input_booster_/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/DECLARE_SET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/DECLARE_RESET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/INIT_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/SET_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/REMOVE_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/emstune_add_request/d' drivers/input/input.c 2>/dev/null || true
             fi
             
             # Try one more build attempt
