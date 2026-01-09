@@ -1,24 +1,79 @@
-- name: Surgical Code Fixes
+name: Atlas Kernel Build
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+    - name: Setup Environment
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3 ccache
+        sudo ln -s /usr/bin/ccache /usr/local/bin/ccache || true
+
+    - name: Get Kernel Source
+      run: |
+        git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+
+    - name: Surgical Code Fixes
       run: |
         cd kernel
-        # 1. Fix bpf_trace.c (Standard cleanup)
+        # Fix bpf_trace.c
         sed -i 's/static inline __printf(1, 0) int bpf_do_trace_printk/static __printf(1, 0) int bpf_do_trace_printk/g' kernel/trace/bpf_trace.c
         
-        # 2. Fix lb_cfs_tasks (SAMSUNG EMS SPECIAL)
-        # We modify the actual EMS header signature so it matches the fair.c expectations
+        # Fix EMS Header (lb_cfs_tasks)
         sed -i 's/int sse/struct sched_entity *se/g' include/linux/ems.h
 
-        # 3. Fix Memory Boosting (SAMSUNG VMSCAN SPECIAL)
-        # We delete the entire function block inside vmscan.c to prevent the 'redefinition' error
-        sed -i '/inline bool need_memory_boosting(void)/,/}/d' mm/vmscan.c
-        # Then we provide the one safe global version in the header
+        # Fix Memory Boosting (The Redefinition Error)
+        # We use a simpler sed to just comment out the offending lines in vmscan.c
+        sed -i 's/inline bool need_memory_boosting(void)/\/* inline bool need_memory_boosting(void) *\//g' mm/vmscan.c
+        
+        # Define it safely in the header
         sed -i 's/extern inline bool need_memory_boosting(void);/static inline bool need_memory_boosting(void) { return false; }/g' include/linux/mm.h
 
-        # 4. Global Warning Suppression (The "Nuclear" Option)
-        # This prevents any minor Samsung code style issues from being treated as fatal errors
+        # Global Warning Suppression
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror-/-W/g' {} +
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror=/-W/g' {} +
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror\b//g' {} +
 
-        # 5. Samsung SecDebug Fix
+        # Samsung SecDebug Fix
         sed -i 's|#define secdbg_exin_get_unfz(a).*|#define secdbg_exin_get_unfz(a) ("")|' include/linux/sec_debug.h || true
+
+    - name: Integrate KernelSU
+      run: |
+        cd kernel
+        rm -rf drivers/kernelsu
+        git clone https://github.com/tiann/KernelSU ksu_tmp
+        mv ksu_tmp/kernel drivers/kernelsu
+        sed -i '1i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
+        sed -i '1i obj-y += kernelsu/' drivers/Makefile
+        rm -rf ksu_tmp
+
+    - name: Build Kernel
+      run: |
+        cd kernel
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export KCFLAGS="-w -Wno-error"
+        mkdir -p out
+
+        chmod +x scripts/config
+        
+        # Auto-detect config
+        CONF_NAME=$(ls arch/arm64/configs/ | grep -E 'a13|3830|exynos850' | head -n 1)
+        
+        make O=out ARCH=arm64 $CONF_NAME
+        
+        ./scripts/config --file out/.config --enable KSU
+        ./scripts/config --file out/.config --disable MODULE_SIG
+        ./scripts/config --file out/.config --disable MODULE_SIG_ALL
+        
+        make O=out ARCH=arm64 olddefconfig
+        make O=out ARCH=arm64 -j$(nproc)
+
+    - name: Upload Kernel
+      uses: actions/upload-artifact@v4
+      with:
+        name: Atlas-Kernel-Image
+        path: kernel/out/arch/arm64/boot/Image
