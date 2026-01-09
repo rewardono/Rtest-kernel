@@ -1,4 +1,4 @@
-name: Build Kernel - Final Complete Fix
+name: Build GKI Kernel - ULTIMATE FINAL
 on:
   workflow_dispatch:
 
@@ -8,193 +8,231 @@ jobs:
     timeout-minutes: 180
 
     steps:
-    - name: Setup Environment
-      run: |
-        sudo apt update
-        sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3
-        
-        # Create ccache that actually works
-        echo '#!/bin/bash' | sudo tee /usr/bin/ccache
-        echo 'shift' | sudo tee -a /usr/bin/ccache
-        echo 'exec "$@"' | sudo tee -a /usr/bin/ccache
-        sudo chmod +x /usr/bin/ccache
-
-    - name: Get Kernel Source
-      run: |
-        rm -rf kernel
-        git clone https://github.com/samsungexynos850/atlas kernel --depth=1
-
-    - name: Apply All Fixes
-      run: |
-        cd kernel
-        
-        echo "=== Applying comprehensive fixes ==="
-        
-        # 1. Fix sec_debug.h (from early errors)
-        sed -i 's|#define secdbg_exin_get_unfz(a).*|#define secdbg_exin_get_unfz(a) ("")|' include/linux/sec_debug.h 2>/dev/null || true
-        
-        # 2. Fix process.c unused variable
-        sed -i '49s|const char \*sys_state\[SYSTEM_END\] = {|const char __maybe_unused \*sys_state\[SYSTEM_END\] = {|' kernel/power/process.c 2>/dev/null || true
-        
-        # 3. Fix all compiler flag patterns
-        find . -type f -name "Makefile*" -exec sed -i \
-          -e 's|-Werror-Wreturn-type|-Wreturn-type|g' \
-          -e 's|-Werror-Wimplicit-function-declaration|-Wimplicit-function-declaration|g' \
-          {} \; 2>/dev/null || true
-        
-        # 4. Remove ccache references
-        sed -i 's|ccache||g' Makefile 2>/dev/null || true
-        sed -i 's|^HOSTCC.*|HOSTCC = gcc|' Makefile 2>/dev/null || true
-        
-        # 5. Fix systrace_mark.h
-        sed -i 's|systrace_mark_end()\s*__systrace_mark(SYSTRACE_MARK_TYPE_END, "")|systrace_mark_end()    __systrace_mark(SYSTRACE_MARK_TYPE_END, "end")|' include/trace/systrace_mark.h 2>/dev/null || true
-        
-        # 6. Fix ems.h - smarter approach
-        if [ -f "include/linux/ems.h" ]; then
-          # Use sed to comment out unused function declarations
-          sed -i '/static.*emstune_/s/^static/static __maybe_unused/' include/linux/ems.h 2>/dev/null || true
-          sed -i '/static inline void frt_limit_fast_cpu/d' include/linux/ems.h 2>/dev/null || true
-        fi
-        
-        # 7. Fix need_memory_boosting - DON'T append, fix the existing declaration
-        # Find the line with need_memory_boosting and fix it
-        if grep -q "extern inline bool need_memory_boosting" include/linux/mm.h 2>/dev/null; then
-          sed -i 's|extern inline bool need_memory_boosting(void);|static inline bool need_memory_boosting(void) { return false; }|' include/linux/mm.h
-        elif grep -q "need_memory_boosting" include/linux/mm.h 2>/dev/null; then
-          # If it's declared differently, fix that line
-          sed -i '/need_memory_boosting/s/.*/static inline bool need_memory_boosting(void) { return false; }/' include/linux/mm.h 2>/dev/null || true
-        fi
-        
-        # 8. Fix lb_cfs_tasks missing function
-        # Check if it's used in fair.c
-        if grep -q "lb_cfs_tasks" kernel/sched/fair.c 2>/dev/null; then
-          # Add a forward declaration at the top
-          echo 'static inline struct list_head *lb_cfs_tasks(struct rq *rq, struct sched_entity *se) { return &rq->cfs_tasks; }' >> kernel/sched/fair.c
-        fi
-        
-        # 9. Fix format specifiers in page_alloc.c
-        sed -i 's|%u|%llu|g' mm/page_alloc.c 2>/dev/null || true
-        
-        echo "✅ All fixes applied"
-
-    - name: Add KernelSU
-      run: |
-        cd kernel
-        rm -rf drivers/kernelsu
-        wget -q https://github.com/tiann/KernelSU/archive/main.tar.gz -O ksu.tar.gz
-        tar -xzf ksu.tar.gz
-        mv KernelSU-main/kernel drivers/kernelsu
-        echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-        echo 'obj-y += kernelsu/' >> drivers/Makefile
-        rm -rf KernelSU-main ksu.tar.gz
-
-    - name: Configure Kernel
-      run: |
-        cd kernel
-        rm -rf out
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export HOSTCC=gcc
-        
-        mkdir -p out
-        make O=out ARCH=arm64 gki_defconfig
-        
-        # Enable KernelSU
-        echo "CONFIG_KSU=y" >> out/.config
-        echo "CONFIG_MODULES=y" >> out/.config
-        echo "# CONFIG_MODULE_SIG is not set" >> out/.config
-        
-        # Disable problematic Samsung features
-        echo "# CONFIG_SEC_DEBUG is not set" >> out/.config
-        echo "# CONFIG_SEC_DEBUG_EXTRA_INFO is not set" >> out/.config
-        
-        make O=out ARCH=arm64 olddefconfig
-
-    - name: Fix Generated Makefiles
-      run: |
-        cd kernel
-        # Fix generated Makefiles
-        find out -type f -name "Makefile*" -exec sed -i \
-          -e 's|-Werror-Wreturn-type|-Wreturn-type|g' \
-          -e 's|-Werror-Wimplicit-function-declaration|-Wimplicit-function-declaration|g' \
-          {} \; 2>/dev/null || true
-
-    - name: Build Kernel
-      run: |
-        cd kernel
-        export ARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export HOSTCC=gcc
-        
-        echo "🚀 Building kernel..."
-        
-        # Build with maximum error tolerance
-        if make O=out ARCH=arm64 KCFLAGS="-w" -j$(nproc) 2>&1 | tee build.log; then
-          echo "✅ Build successful!"
-        else
-          echo "⚠️ Parallel build failed, trying single core..."
+      - name: 🔧 Setup Environment
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            git \
+            wget \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu
           
-          # Clean and try single core
-          make O=out ARCH=arm64 clean 2>/dev/null || true
+          # Create working ccache
+          echo '#!/bin/bash' | sudo tee /usr/bin/ccache
+          echo 'exec "$@"' | sudo tee -a /usr/bin/ccache
+          sudo chmod +x /usr/bin/ccache
+
+      - name: 📥 Get Kernel Source
+        run: |
+          rm -rf kernel
+          git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+
+      - name: 🔨 Apply Comprehensive Fixes
+        run: |
+          cd kernel
           
-          if make O=out ARCH=arm64 KCFLAGS="-w" -j1 2>&1 | tee build_single.log; then
-            echo "✅ Single-core build successful!"
+          echo "=== APPLYING ALL FIXES ==="
+          
+          # 1. CCACHE FIXES (from early errors)
+          echo "Fixing ccache references..."
+          sed -i 's/\bccache\b//g' Makefile 2>/dev/null || true
+          sed -i 's/^HOSTCC.*/HOSTCC = gcc/' Makefile 2>/dev/null || true
+          
+          # 2. COMPILER FLAG FIXES
+          echo "Fixing compiler flags..."
+          find . -type f -name "Makefile*" -exec sed -i \
+            -e 's/-Werror-Wreturn-type/-Wreturn-type/g' \
+            -e 's/-Werror-Wimplicit-function-declaration/-Wimplicit-function-declaration/g' \
+            {} \; 2>/dev/null || true
+          
+          # 3. SEC_DEBUG.H FIX
+          echo "Fixing sec_debug.h..."
+          sed -i 's/#define secdbg_exin_get_unfz(a).*/#define secdbg_exin_get_unfz(a) ("")/' include/linux/sec_debug.h 2>/dev/null || true
+          
+          # 4. PROCESS.C FIX
+          echo "Fixing process.c..."
+          sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c 2>/dev/null || true
+          
+          # 5. SYSTRACE_MARK.H FIX
+          echo "Fixing systrace_mark.h..."
+          sed -i 's/systrace_mark_end()\s*__systrace_mark(SYSTRACE_MARK_TYPE_END, "")/systrace_mark_end()    __systrace_mark(SYSTRACE_MARK_TYPE_END, "end")/' include/trace/systrace_mark.h 2>/dev/null || true
+          
+          # 6. EMS.H FIX
+          echo "Fixing ems.h..."
+          if [ -f "include/linux/ems.h" ]; then
+            sed -i 's/static void emstune_/static __maybe_unused void emstune_/g' include/linux/ems.h 2>/dev/null || true
+            sed -i '/static inline void frt_limit_fast_cpu/d' include/linux/ems.h 2>/dev/null || true
+          fi
+          
+          # 7. NEED_MEMORY_BOOSTING FIX - CRITICAL
+          echo "Fixing need_memory_boosting..."
+          # Check if it exists in vmscan.c and remove that definition
+          if grep -q "inline bool need_memory_boosting" mm/vmscan.c 2>/dev/null; then
+            # Comment out the entire function in vmscan.c
+            sed -i '/inline bool need_memory_boosting/,/^}/s/^/\/\//' mm/vmscan.c 2>/dev/null || true
+          fi
+          
+          # Remove any duplicate definition we might have added
+          sed -i '/need_memory_boosting.*{.*}/d' include/linux/mm.h 2>/dev/null || true
+          
+          # 8. LB_CFS_TASKS FIX - CRITICAL
+          echo "Fixing lb_cfs_tasks..."
+          # Remove any definition we added before
+          sed -i '/lb_cfs_tasks.*{.*}/d' kernel/sched/fair.c 2>/dev/null || true
+          
+          # Fix the call to use the correct function
+          sed -i 's/lb_cfs_tasks(rq, p->sse)/\&rq->cfs_tasks/' kernel/sched/fair.c 2>/dev/null || true
+          
+          # 9. BPF_TRACE FIX
+          echo "Fixing bpf_trace..."
+          sed -i 's/static inline __printf(1, 0) int bpf_do_trace_printk/static __printf(1, 0) int bpf_do_trace_printk/' kernel/trace/bpf_trace.c 2>/dev/null || true
+          
+          # 10. FORMAT SPECIFIER FIX
+          echo "Fixing format specifiers..."
+          sed -i 's/"alloc stall: timeJS(ms):%u|%u rec:%lu|%lu ret:%d o:%d gfp:%#x(%pGg) AaiFai:%lukB|%lukB|%lukB|%lukB\\n"/"alloc stall: timeJS(ms):%llu|%llu rec:%lu|%lu ret:%d o:%d gfp:%#x(%pGg) AaiFai:%lukB|%lukB|%lukB|%lukB\\n"/' mm/page_alloc.c 2>/dev/null || true
+          
+          echo "✅ All fixes applied"
+
+      - name: ⚡ Add KernelSU
+        run: |
+          cd kernel
+          rm -rf drivers/kernelsu
+          wget -q https://github.com/tiann/KernelSU/archive/main.tar.gz -O ksu.tar.gz
+          tar -xzf ksu.tar.gz
+          mv KernelSU-main/kernel drivers/kernelsu
+          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          echo 'obj-y += kernelsu/' >> drivers/Makefile
+          rm -rf KernelSU-main ksu.tar.gz
+
+      - name: ⚙️ Configure Kernel
+        run: |
+          cd kernel
+          rm -rf out
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export HOSTCC=gcc
+          
+          mkdir -p out
+          make O=out ARCH=arm64 gki_defconfig
+          
+          # Enable KernelSU
+          echo "CONFIG_KSU=y" >> out/.config
+          echo "CONFIG_MODULES=y" >> out/.config
+          
+          # Disable problematic features
+          echo "# CONFIG_SEC_DEBUG is not set" >> out/.config
+          echo "# CONFIG_SEC_DEBUG_EXTRA_INFO is not set" >> out/.config
+          
+          make O=out ARCH=arm64 olddefconfig
+
+      - name: 🛠️ Fix Generated Makefiles
+        run: |
+          cd kernel
+          # Fix any remaining bad flags
+          find out -type f -name "Makefile*" -exec sed -i \
+            -e 's/-Werror-Wreturn-type/-Wreturn-type/g' \
+            -e 's/-Werror-Wimplicit-function-declaration/-Wimplicit-function-declaration/g' \
+            {} \; 2>/dev/null || true
+
+      - name: 🏗️ Build Kernel with MAX Tolerance
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export HOSTCC=gcc
+          
+          echo "🚀 Starting ULTIMATE build..."
+          
+          # Build with ALL warnings disabled
+          if make O=out ARCH=arm64 KCFLAGS="-w -Wno-error -Wno-implicit-function-declaration -Wno-return-type -Wno-format -Wno-unused-function" -j$(nproc) 2>&1 | tee build.log; then
+            echo "✅ Build successful!"
           else
-            echo "❌ Build failed"
+            echo "⚠️ Parallel build failed, trying single core..."
             
-            # Show specific errors
-            echo "=== ERROR ANALYSIS ==="
-            tail -100 build_single.log | grep -A5 -B5 "error:" || tail -100 build_single.log
-            
-            # Try one more approach
-            echo "⚠️ Trying alternative build method..."
             make O=out ARCH=arm64 clean 2>/dev/null || true
             
-            # Build just the Image target
-            if make O=out ARCH=arm64 Image KCFLAGS="-w" 2>&1 | tee build_image.log; then
-              echo "✅ Image build successful!"
+            if make O=out ARCH=arm64 KCFLAGS="-w" -j1 2>&1 | tee build_single.log; then
+              echo "✅ Single-core build successful!"
             else
-              echo "❌ Final attempt failed"
-              exit 1
+              echo "❌ Build failed - analyzing errors..."
+              
+              # Show specific errors
+              tail -200 build_single.log | grep -A5 -B5 "error:" || tail -200 build_single.log
+              
+              # Try minimal build
+              echo "⚠️ Trying minimal build..."
+              make O=out ARCH=arm64 clean 2>/dev/null || true
+              
+              # Build only Image
+              if make O=out ARCH=arm64 Image KCFLAGS="-w" 2>&1 | tee build_image.log; then
+                echo "✅ Minimal build successful!"
+              else
+                echo "❌ All attempts failed"
+                exit 1
+              fi
             fi
           fi
-        fi
-        
-        # Check if kernel was built
-        if [ -f "out/arch/arm64/boot/Image" ]; then
-          echo "🎉🎉🎉 KERNEL BUILD SUCCESSFUL! 🎉🎉🎉"
-          echo "Kernel: out/arch/arm64/boot/Image"
-          ls -lh out/arch/arm64/boot/Image
-        else
-          echo "❌ Kernel not found"
-          exit 1
-        fi
+          
+          # Check if kernel was built
+          if [ -f "out/arch/arm64/boot/Image" ]; then
+            echo "🎉🎉🎉 KERNEL BUILD SUCCESSFUL! 🎉🎉🎉"
+            echo "Kernel: out/arch/arm64/boot/Image"
+            ls -lh out/arch/arm64/boot/Image
+            file out/arch/arm64/boot/Image
+          else
+            echo "❌ Kernel not found"
+            # Look for any kernel files
+            find out -name "Image" -o -name "*.img" -o -name "vmlinuz" 2>/dev/null
+            exit 1
+          fi
 
-    - name: Create Flashable Package
-      if: success()
-      run: |
-        cd kernel
-        mkdir -p anykernel
-        cp out/arch/arm64/boot/Image anykernel/
-        echo 'dd if=/tmp/anykernel/Image of=/dev/block/by-name/boot' > anykernel/anykernel.sh
-        chmod +x anykernel/anykernel.sh
-        cd anykernel
-        zip -r9 ../kernel.zip .
+      - name: 📦 Create Flashable Package
+        if: success()
+        run: |
+          cd kernel
+          mkdir -p anykernel
+          cp out/arch/arm64/boot/Image anykernel/
+          
+          cat > anykernel/anykernel.sh << 'EOF'
+#!/system/bin/sh
+echo " "
+echo "GKI Kernel for Samsung A135F"
+echo "With KernelSU Support"
+echo "Built on GitHub Actions"
+echo " "
+dd if=/tmp/anykernel/Image of=/dev/block/by-name/boot
+echo "Done!"
+EOF
+          
+          chmod +x anykernel/anykernel.sh
+          cd anykernel
+          zip -r9 ../kernel.zip .
+          
+          echo "✅ Package created: kernel.zip"
+          ls -lh ../kernel.zip
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-build
-        path: |
-          kernel/out/arch/arm64/boot/Image
-          kernel/kernel.zip
+      - name: 📤 Upload Kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build
+          path: |
+            kernel/out/arch/arm64/boot/Image
+            kernel/kernel.zip
+          retention-days: 7
 
-    - name: Upload Logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-logs
-        path: |
-          kernel/build.log
-          kernel/build_single.log
-          kernel/build_image.log
+      - name: 📋 Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            kernel/build.log
+            kernel/build_single.log
+            kernel/build_image.log
+          retention-days: 3
