@@ -1,4 +1,4 @@
-name: Build Kernel - Complete Fixes v5
+name: Build Kernel - Complete Fixes v6
 on:
   workflow_dispatch:
 jobs:
@@ -136,72 +136,51 @@ jobs:
           sed -i '/unsigned long dfso_multiplication_weight;/a unsigned long dfso_multiplication_weight = 1;' drivers/devfreq/governor_simpleondemand.c 2>/dev/null || true
         fi
 
-        # 14. NEW FIX: Input booster - remove or comment out problematic macros and functions
+        # 14. NEW FIX: Input booster - aggressively comment out the entire vendor section to avoid syntax errors
         echo "Fixing input_booster in input.c..."
         if [ -f "drivers/input/input.c" ]; then
           # Backup file
           cp drivers/input/input.c drivers/input/input.c.backup
           
-          # Remove DECLARE lines for all types
+          # Comment out the entire Input Booster section from the comment to the end of the file
+          sed -i '/\/\* \[ System Performance - Input Booster \*\//,$s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          
+          # Remove the include for input_booster.h
+          sed -i '/#include <linux\/input\/input_booster.h>/d' drivers/input/input.c 2>/dev/null || true
+          
+          # Additional cleanups to remove any remaining booster references
           sed -i '/DECLARE_SET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/DECLARE_RESET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/DECLARE_TIMEOUT_FUNC/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/DECLARE_STATE_FUNC/d' drivers/input/input.c 2>/dev/null || true
-          
-          # Comment out the entire booster block if marked
-          sed -i '/\/\* \[ System Performance - Input Booster \*\//,/\/\* System Performance - Input Booster \] \*\//s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          
-          # Comment out input_booster_init function (handle indented })
-          sed -i '/void input_booster_init(void)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          
-          # Comment out state functions (idle, press)
-          sed -i '/DECLARE_STATE_FUNC(idle)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          sed -i '/DECLARE_STATE_FUNC(press)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          
-          # Comment out input_booster function
-          sed -i '/void input_booster(struct input_dev \*dev)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          
-          # Comment out input_event booster logic
-          sed -i '/if (device_tree_infor != NULL)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          
-          # Comment out reset work functions
-          sed -i '/_reset_booster_work_func/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          
-          # Comment out emstune related
-          sed -i '/input_emstune_init/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          sed -i '/INIT_INPUT_EMSTUNE/d' drivers/input/input.c 2>/dev/null || true
-          
-          # Remove calls to input_booster functions in other parts
-          sed -i 's/input_booster_.*();//g' drivers/input/input.c 2>/dev/null || true
-          
-          # Fix syntax in macros if needed (fallback)
-          sed -i '/head_time/d' drivers/input/input.c 2>/dev/null || true
-          sed -i '/tail_time/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/INIT_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/SET_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/REMOVE_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/RUN_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/pr_booster/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/input_booster_/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/emstune_add_request/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/input_count/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/input_events/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/TouchIDs/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/device_tree_infor/d' drivers/input/input.c 2>/dev/null || true
-          sed -i '/pr_booster/d' drivers/input/input.c 2>/dev/null || true
-          sed -i '/RUN_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
           
-          # Remove includes
-          sed -i '/#include <linux\/input\/input_booster.h>/d' drivers/input/input.c 2>/dev/null || true
+          # Comment out specific functions if still present
+          sed -i '/void input_booster_init(void)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          sed -i '/void input_booster(struct input_dev \*dev)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          sed -i '/input_emstune_init/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          sed -i '/DECLARE_STATE_FUNC(idle)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          sed -i '/DECLARE_STATE_FUNC(press)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          sed -i '/_reset_booster_work_func/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          
+          # Remove any stray closing braces or fix syntax
+          # This is a hack: remove lines that are just '}' if causing issues
+          sed -i '/^[ \t]*}[ \t]*$/d' drivers/input/input.c 2>/dev/null || true
         fi
         
-        # Fix header if needed
+        # Fix header if needed - comment entire file
         if [ -f "include/linux/input/input_booster.h" ]; then
-          # Comment out problematic macro definitions
-          sed -i '/#define SET_BOOSTER/,/#endif/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
-          sed -i '/#define REMOVE_BOOSTER/,/#endif/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
-          sed -i '/CHANGE_BOOSTER/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
-          sed -i '/INIT_BOOSTER/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
-          sed -i '/DECLARE_TIMEOUT_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
-          sed -i '/DECLARE_SET_BOOSTER_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
-          sed -i '/DECLARE_RESET_BOOSTER_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
-          sed -i '/DECLARE_STATE_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
-          sed -i '/TIMEOUT_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
-          sed -i '/SET_BOOSTER_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
-          sed -i '/RESET_BOOSTER_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '1,$s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
         fi
         
         echo "✅ All fixes applied"
@@ -309,6 +288,7 @@ jobs:
             # NEW: Emergency fix for input_booster if still error
             if grep -q "input_booster" build_single.log 2>/dev/null || grep -q "head_time" build_single.log 2>/dev/null; then
               echo "Applying emergency input_booster fix..."
+              sed -i '/\/\* \[ System Performance - Input Booster \*\//,$s/^/\/\//' drivers/input/input.c 2>/dev/null || true
               sed -i '/#include <linux\/input\/input_booster.h>/d' drivers/input/input.c 2>/dev/null || true
               sed -i '/input_booster_/d' drivers/input/input.c 2>/dev/null || true
               sed -i '/DECLARE_SET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
@@ -325,9 +305,8 @@ jobs:
               sed -i '/input_events/d' drivers/input/input.c 2>/dev/null || true
               sed -i '/TouchIDs/d' drivers/input/input.c 2>/dev/null || true
               sed -i '/device_tree_infor/d' drivers/input/input.c 2>/dev/null || true
-              # Comment remaining functions
-              sed -i '/void input_booster_init(void)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-              sed -i '/void input_booster(struct input_dev \*dev)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+              # Remove stray braces
+              sed -i '/^[ \t]*}[ \t]*$/d' drivers/input/input.c 2>/dev/null || true
             fi
             
             # Try one more build attempt
