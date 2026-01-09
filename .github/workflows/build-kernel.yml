@@ -1,4 +1,4 @@
-name: Atlas Kernel - Permission & EMS Fix
+name: Atlas Kernel - Final Surgical Fix
 on:
   workflow_dispatch:
 
@@ -22,18 +22,23 @@ jobs:
         # 1. Fix bpf_trace.c (Remove 'inline' from variadic function)
         sed -i 's/static inline __printf(1, 0) int bpf_do_trace_printk/static __printf(1, 0) int bpf_do_trace_printk/g' kernel/trace/bpf_trace.c
         
-        # 2. Fix lb_cfs_tasks (Match the Samsung EMS 'int' signature)
-        sed -i '1i struct rq; static inline struct list_head *lb_cfs_tasks(struct rq *rq, int sse) { return &rq->cfs_tasks; }' kernel/sched/fair.c
-        
-        # 3. Fix need_memory_boosting (Provide a full body in the header)
+        # 2. Fix lb_cfs_tasks Conflict
+        # Instead of injecting at Line 1, we fix the signature in the EMS header to match the C file
+        sed -i 's/int sse/struct sched_entity *se/g' include/linux/ems.h
+
+        # 3. Fix Memory Boosting Conflict
+        # We remove the local definition in vmscan.c so it uses the one in the header
+        # We use a range-based sed to delete the specific function block
+        sed -i '/inline bool need_memory_boosting(void)/,/}/d' mm/vmscan.c
+        # Now provide the global definition safely
         sed -i 's/extern inline bool need_memory_boosting(void);/static inline bool need_memory_boosting(void) { return false; }/g' include/linux/mm.h
 
-        # 4. Global Warning Suppression (Turn Errors into Warnings)
+        # 4. Global Warning Suppression
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror-/-W/g' {} +
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror=/-W/g' {} +
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror\b//g' {} +
 
-        # 5. Samsung-specific include error fix
+        # 5. Samsung SecDebug Fix
         sed -i 's|#define secdbg_exin_get_unfz(a).*|#define secdbg_exin_get_unfz(a) ("")|' include/linux/sec_debug.h || true
 
     - name: Integrate KernelSU
@@ -54,14 +59,12 @@ jobs:
         export KCFLAGS="-w -Wno-error"
         mkdir -p out
 
-        # Fix script permissions
         chmod +x scripts/config
         
         CONF_NAME=$(ls arch/arm64/configs/ | grep -E 'a13|3830|exynos850' | head -n 1)
         
         make O=out ARCH=arm64 $CONF_NAME
         
-        # Now using the script with proper permissions
         ./scripts/config --file out/.config --enable KSU
         ./scripts/config --file out/.config --disable MODULE_SIG
         ./scripts/config --file out/.config --disable MODULE_SIG_ALL
@@ -72,5 +75,5 @@ jobs:
     - name: Upload Kernel
       uses: actions/upload-artifact@v4
       with:
-        name: Atlas-A135F-Build
+        name: Atlas-A135F-Image
         path: kernel/out/arch/arm64/boot/Image
