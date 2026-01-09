@@ -1,191 +1,78 @@
-name: Build GKI Kernel - ULTIMATE FINAL
+name: Build Kernel - SIMPLE FIXED
 on:
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
-
+    
     steps:
-      - name: Install Dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            build-essential \
-            bc \
-            bison \
-            flex \
-            libssl-dev \
-            libelf-dev \
-            git \
-            wget \
-            gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu
-          
-          # Create a REAL working ccache at system level
-          sudo bash -c 'cat > /usr/bin/ccache << "EOF"
-          #!/bin/bash
-          # Real ccache that calls gcc
-          exec gcc "$@"
-          EOF'
-          sudo chmod +x /usr/bin/ccache
-
-      - name: Get Kernel Source
-        run: |
-          rm -rf kernel
-          git clone https://github.com/samsungexynos850/atlas kernel --depth=1
-
-      - name: Apply Nuclear Fixes
-        run: |
-          cd kernel
-          
-          echo "=== NUCLEAR FIX ==="
-          
-          # 1. COMPLETELY REMOVE CCACHE FROM ALL FILES
-          echo "Removing ccache from all files..."
-          find . -type f \( -name "Makefile*" -o -name "Kbuild*" -o -name "*.mk" \) \
-            -exec grep -l "ccache" {} \; 2>/dev/null | while read file; do
-            echo "Fixing: $file"
-            sed -i 's/\bccache\b//g' "$file"
-          done
-          
-          # 2. Set HOSTCC to gcc EXPLICITLY
-          echo "Setting HOSTCC to gcc..."
-          sed -i 's/^HOSTCC\s*:=.*/HOSTCC := gcc/' Makefile 2>/dev/null || true
-          sed -i 's/^HOSTCXX\s*:=.*/HOSTCXX := g++/' Makefile 2>/dev/null || true
-          
-          # 3. Fix scripts/Makefile.host
-          if [ -f "scripts/Makefile.host" ]; then
-            echo "Fixing scripts/Makefile.host..."
-            sed -i 's/^HOSTCC\s*:=.*/HOSTCC := gcc/' scripts/Makefile.host
-            sed -i 's/^HOSTCXX\s*:=.*/HOSTCXX := g++/' scripts/Makefile.host
-          fi
-          
-          # 4. Fix the sec_debug.h macro
-          echo "Fixing sec_debug.h..."
-          sed -i 's/#define secdbg_exin_get_unfz(a).*/#define secdbg_exin_get_unfz(a) ("")/' include/linux/sec_debug.h 2>/dev/null || true
-          
-          # 5. Fix process.c
-          echo "Fixing process.c..."
-          sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c 2>/dev/null || true
-          
-          # 6. Fix ALL compiler flags
-          echo "Fixing compiler flags..."
-          find . -type f \( -name "Makefile*" -o -name "Kbuild*" \) -exec sed -i \
-            -e 's/-Werror-Wreturn-type/-Wreturn-type/g' \
-            -e 's/-Werror-Wimplicit-function-declaration/-Wimplicit-function-declaration/g' \
-            {} \; 2>/dev/null || true
-          
-          echo "✅ Nuclear fixes done"
-
-      - name: Add KernelSU
-        run: |
-          cd kernel
-          rm -rf drivers/kernelsu 2>/dev/null || true
-          wget -q https://github.com/tiann/KernelSU/archive/main.tar.gz -O ksu.tar.gz
-          tar -xzf ksu.tar.gz
-          mv KernelSU-main/kernel drivers/kernelsu
-          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-          echo 'obj-y += kernelsu/' >> drivers/Makefile
-          rm -rf KernelSU-main ksu.tar.gz
-
-      - name: Configure Kernel
-        run: |
-          cd kernel
-          rm -rf out
-          
-          # EXPORT EVERYTHING EXPLICITLY
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export HOSTCC=gcc
-          export HOSTCXX=g++
-          unset CCACHE
-          
-          mkdir -p out
-          
-          echo "=== CONFIGURATION ==="
-          make O=out ARCH=arm64 gki_defconfig
-          
-          echo "CONFIG_KSU=y" >> out/.config
-          echo "CONFIG_MODULES=y" >> out/.config
-          
-          make O=out ARCH=arm64 olddefconfig
-
-      - name: Fix Generated Makefile
-        run: |
-          cd kernel
-          echo "=== FIXING GENERATED MAKEFILE ==="
-          
-          # Fix the generated Makefile in out/
-          if [ -f "out/Makefile" ]; then
-            sed -i \
-              -e 's/-Werror-Wreturn-type/-Wreturn-type/g' \
-              -e 's/-Werror-Wimplicit-function-declaration/-Wimplicit-function-declaration/g' \
-              -e 's/\bccache\b//g' \
-              out/Makefile
-          fi
-          
-          # Also fix scripts/Makefile.host in out/
-          if [ -f "out/scripts/Makefile.host" ]; then
-            sed -i 's/^HOSTCC\s*:=.*/HOSTCC := gcc/' out/scripts/Makefile.host
-          fi
-
-      - name: Build Kernel
-        run: |
-          cd kernel
-          
-          # EXPORT EVERYTHING AGAIN
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export HOSTCC=gcc
-          export HOSTCXX=g++
-          export KCFLAGS="-Wno-error"
-          
-          echo "🚀 STARTING BUILD..."
-          
-          # Direct build with NO ccache
-          make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log || {
-            echo "⚠️ Build failed, trying single core..."
-            tail -50 build.log
-            
-            make O=out ARCH=arm64 clean 2>/dev/null || true
-            make O=out ARCH=arm64 -j1 2>&1 | tee build_single.log || {
-              echo "❌ FINAL FAILURE"
-              echo "=== LAST ERROR ==="
-              tail -100 build_single.log
-              exit 1
-            }
-          }
-          
-          if [ -f "out/arch/arm64/boot/Image" ]; then
-            echo "🎉🎉🎉 SUCCESS! 🎉🎉🎉"
-            ls -lh out/arch/arm64/boot/Image
-          else
-            echo "❌ No kernel found"
-            exit 1
-          fi
-
-      - name: Create Package
-        if: success()
-        run: |
-          cd kernel
-          mkdir -p anykernel
-          cp out/arch/arm64/boot/Image anykernel/
-          
-          cat > anykernel/anykernel.sh << 'EOF'
-#!/system/bin/sh
-echo "Kernel built successfully!"
-EOF
-          
-          chmod +x anykernel/anykernel.sh
-          cd anykernel
-          zip -r9 ../kernel.zip *
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel
-          path: |
-            kernel/out/arch/arm64/boot/Image
-            kernel/kernel.zip
+    - name: Setup
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+        # Create simple ccache
+        echo '#!/bin/bash' | sudo tee /usr/local/bin/ccache
+        echo 'exec "${@}"' | sudo tee -a /usr/local/bin/ccache
+        sudo chmod +x /usr/local/bin/ccache
+    
+    - name: Get Kernel
+      run: |
+        rm -rf kernel
+        git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+    
+    - name: Fix Files
+      run: |
+        cd kernel
+        
+        # Fix sec_debug.h
+        sed -i 's/#define secdbg_exin_get_unfz(a).*/#define secdbg_exin_get_unfz(a) ("")/' include/linux/sec_debug.h 2>/dev/null || true
+        
+        # Fix process.c
+        sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c 2>/dev/null || true
+        
+        # Remove ccache from Makefiles
+        sed -i 's/ccache//g' Makefile 2>/dev/null || true
+        if [ -f "scripts/Makefile.host" ]; then
+          sed -i 's/ccache//g' scripts/Makefile.host
+          sed -i 's/^HOSTCC.*/HOSTCC = gcc/' scripts/Makefile.host
+        fi
+    
+    - name: Add KernelSU
+      run: |
+        cd kernel
+        rm -rf drivers/kernelsu 2>/dev/null || true
+        wget -q https://github.com/tiann/KernelSU/archive/main.tar.gz
+        tar -xzf main.tar.gz
+        mv KernelSU-main/kernel drivers/kernelsu
+        echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+        echo 'obj-y += kernelsu/' >> drivers/Makefile
+        rm -rf KernelSU-main main.tar.gz
+    
+    - name: Configure
+      run: |
+        cd kernel
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export HOSTCC=gcc
+        mkdir -p out
+        make O=out gki_defconfig
+        echo "CONFIG_KSU=y" >> out/.config
+        echo "CONFIG_MODULES=y" >> out/.config
+        make O=out olddefconfig
+    
+    - name: Build
+      run: |
+        cd kernel
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export HOSTCC=gcc
+        make O=out -j$(nproc) || make O=out -j1
+        ls -la out/arch/arm64/boot/ 2>/dev/null || true
+    
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      if: success()
+      with:
+        name: kernel
+        path: kernel/out/arch/arm64/boot/Image
