@@ -1,5 +1,7 @@
-name: Build GKI-like Kernel for A135F
+name: Build GKI-like Kernel for Galaxy A135F
+
 on:
+  # Allows manual trigger from GitHub Actions tab
   workflow_dispatch:
 
 jobs:
@@ -8,6 +10,9 @@ jobs:
     timeout-minutes: 180
 
     steps:
+    - name: Checkout (not needed but good practice)
+      uses: actions/checkout@v4
+
     - name: Setup Environment
       run: |
         sudo apt update
@@ -22,39 +27,34 @@ jobs:
       run: |
         cd kernel
 
-        # === Fix watchdog.c: remove entire Samsung softlockup block ===
+        # Fix watchdog.c: remove Samsung softlockup block completely
         if [ -f "kernel/watchdog.c" ]; then
-          echo "Fixing watchdog.c: removing Samsung softlockup code..."
           sed -i '/^#ifdef CONFIG_SOFTLOCKUP_DETECTOR$/,/^#endif$/d' kernel/watchdog.c
           sed -i '/percpu_sl_info\|sl_to_name\|check_softlockup_type/d' kernel/watchdog.c
         fi
 
-        # === Fix need_memory_boosting ===
+        # Stub need_memory_boosting
         echo '#ifndef need_memory_boosting
 static inline bool need_memory_boosting(void) { return false; }
 #endif' >> include/linux/mm.h
 
-        # === Remove problematic Samsung subsystems entirely ===
+        # Remove problematic Samsung subsystems
         rm -rf \
           kernel/sched/ems/ \
           drivers/soc/samsung/bts/ \
           drivers/staging/sec_debug/ \
           kernel/trace/sec/
 
-        # === Stub any lingering includes ===
+        # Stub lingering includes
         find . -type f \( -name "*.c" -o -name "*.h" \) -exec sed -i \
           -e 's|#include ".*ems/.*"|// REMOVED EMS|g' \
           -e 's|#include <linux/ems.h>|// REMOVED EMS|g' \
           -e 's|#include ".*bts.*"|// REMOVED BTS|g' \
           {} \;
 
-        # === Fix systrace_mark.h ===
+        # Minor fixes
         sed -i 's|systrace_mark_end()\s*__systrace_mark(SYSTRACE_MARK_TYPE_END, "")|systrace_mark_end() __systrace_mark(SYSTRACE_MARK_TYPE_END, "end")|' include/trace/systrace_mark.h 2>/dev/null || true
-
-        # === Fix process.c unused variable ===
         sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused *sys_state[SYSTEM_END] = {/' kernel/power/process.c 2>/dev/null || true
-
-        # === Fix bpf_trace.c inline issue ===
         sed -i 's/static inline __printf(1, 0)/static __noinline __printf(1, 0)/' kernel/trace/bpf_trace.c 2>/dev/null || true
 
     - name: Add KernelSU
@@ -73,21 +73,21 @@ static inline bool need_memory_boosting(void) { return false; }
         export CROSS_COMPILE=aarch64-linux-gnu-
         mkdir -p out
 
-        # Use defconfig since gki_defconfig DOES NOT EXIST in this tree
+        # Use defconfig (gki_defconfig does NOT exist in this tree!)
         make O=out ARCH=arm64 defconfig
 
         chmod +x scripts/config
 
-        # Enable KernelSU
+        # KernelSU
         ./scripts/config --file out/.config --enable KSU
         ./scripts/config --file out/.config --set-str KSU_GIT_VERSION "gh-action"
 
-        # Disable module signing
+        # Security & signing
         ./scripts/config --file out/.config --disable MODULE_SIG
         ./scripts/config --file out/.config --disable MODULE_SIG_ALL
         ./scripts/config --file out/.config --disable MODULE_SIG_FORCE
 
-        # Aggressively disable Samsung debug & scheduler features
+        # Disable Samsung debug & scheduler features
         ./scripts/config --file out/.config --disable SEC_DEBUG
         ./scripts/config --file out/.config --disable SEC_DEBUG_EXTRA_INFO
         ./scripts/config --file out/.config --disable EXYNOS_BTS
@@ -97,10 +97,10 @@ static inline bool need_memory_boosting(void) { return false; }
         ./scripts/config --file out/.config --disable SEC_DEBUG_SOFTLOCKUP_DETECTOR
         ./scripts/config --file out/.config --disable SEC_DEBUG_WATCHDOG
 
-        # Fix devfreq error: disable broken governor
+        # Fix devfreq error
         ./scripts/config --file out/.config --disable DEVFREQ_GOV_SIMPLE_ONDEMAND
 
-        # Enforce GKI-like setting (optional but recommended)
+        # Optional: mark as GKI-like
         echo "CONFIG_GKI_KERNEL=y" >> out/.config
 
         make O=out ARCH=arm64 olddefconfig
@@ -113,7 +113,6 @@ static inline bool need_memory_boosting(void) { return false; }
         export KCFLAGS="-w -Wno-error -Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types"
 
         echo "🚀 Starting kernel build..."
-
         if make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log; then
           echo "✅ Build succeeded!"
         else
@@ -175,7 +174,7 @@ EOF
           kernel/out/arch/arm64/boot/Image
           kernel/Atlas-GKI-Kernel-*.zip
 
-    - name: Upload Logs
+    - name: Upload Build Logs
       if: always()
       uses: actions/upload-artifact@v4
       with:
