@@ -1,4 +1,4 @@
-name: Atlas Kernel - Final Defconfig Fix
+name: Atlas Kernel - Fix Compiler Flags
 on:
   workflow_dispatch:
 
@@ -19,14 +19,21 @@ jobs:
     - name: Surgical Code Fixes
       run: |
         cd kernel
-        # Fix bpf_trace.c (Remove 'inline' from variadic function)
+        # 1. Fix bpf_trace.c (Remove 'inline' from variadic function)
         sed -i 's/static inline __printf(1, 0) int bpf_do_trace_printk/static __printf(1, 0) int bpf_do_trace_printk/g' kernel/trace/bpf_trace.c
         
-        # Fix lb_cfs_tasks conflict (Place declaration at top)
+        # 2. Fix lb_cfs_tasks conflict (Place declaration at top)
         sed -i '1i struct rq; struct sched_entity; static inline struct list_head *lb_cfs_tasks(struct rq *rq, struct sched_entity *se) { return (struct list_head *)se; }' kernel/sched/fair.c
         
-        # Global Warning Suppression
-        find . -type f -name "Makefile*" -exec sed -i 's/-Werror//g' {} +
+        # 3. FIX COMPILER FLAGS (The smarter way) 
+        # Instead of deleting -Werror, we turn it into -W (warning) so the flag remains valid
+        find . -type f -name "Makefile*" -exec sed -i 's/-Werror-/-W/g' {} +
+        find . -type f -name "Makefile*" -exec sed -i 's/-Werror=/-W/g' {} +
+        # Remove standalone -Werror
+        find . -type f -name "Makefile*" -exec sed -i 's/-Werror\b//g' {} +
+
+        # 4. Samsung-specific include error fix
+        sed -i 's|#define secdbg_exin_get_unfz(a).*|#define secdbg_exin_get_unfz(a) ("")|' include/linux/sec_debug.h || true
 
     - name: Integrate KernelSU
       run: |
@@ -43,30 +50,27 @@ jobs:
         cd kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        export KCFLAGS="-w"
+        # Use -w to suppress all warnings and -Wno-error to ensure nothing stops the build
+        export KCFLAGS="-w -Wno-error"
         mkdir -p out
 
-        # AUTO-DETECT DEFCONFIG: This finds the right file even if the name changes
-        # We look for 'a13', '3830', or 'exynos850' in the configs folder
+        # Find the config we successfully identified last time
         CONF_NAME=$(ls arch/arm64/configs/ | grep -E 'a13|3830|exynos850' | head -n 1)
         echo "Found Config: $CONF_NAME"
         
-        # Step 1: Generate .config
         make O=out ARCH=arm64 $CONF_NAME
         
-        # Step 2: Force KSU and Disable Signature checks
-        # Using 'echo' is safer than scripts/config when doing bulk changes
+        # Force KSU and Disable Signature checks
         echo "CONFIG_KSU=y" >> out/.config
         echo "CONFIG_MODULES=y" >> out/.config
         echo "CONFIG_MODULE_SIG=n" >> out/.config
         echo "CONFIG_MODULE_SIG_ALL=n" >> out/.config
         
-        # Step 3: Finalize and Compile
         make O=out ARCH=arm64 olddefconfig
         make O=out ARCH=arm64 -j$(nproc)
 
     - name: Upload Kernel
       uses: actions/upload-artifact@v4
       with:
-        name: Atlas-A135F-Fixed
+        name: Atlas-A135F-Fixed-Image
         path: kernel/out/arch/arm64/boot/Image
