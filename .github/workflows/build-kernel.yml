@@ -1,4 +1,4 @@
-name: Atlas Kernel - Final Surgical Fix
+name: Atlas Kernel - Samsung EMS Alignment
 on:
   workflow_dispatch:
 
@@ -19,18 +19,17 @@ jobs:
     - name: Surgical Code Fixes
       run: |
         cd kernel
-        # 1. Fix bpf_trace.c (Remove 'inline' from variadic function)
+        # 1. Fix bpf_trace.c (Standard cleanup)
         sed -i 's/static inline __printf(1, 0) int bpf_do_trace_printk/static __printf(1, 0) int bpf_do_trace_printk/g' kernel/trace/bpf_trace.c
         
-        # 2. Fix lb_cfs_tasks Conflict
-        # Instead of injecting at Line 1, we fix the signature in the EMS header to match the C file
+        # 2. Fix lb_cfs_tasks (Align Samsung EMS header with the Scheduler)
+        # We change 'int sse' to 'struct sched_entity *se' to match fair.c
         sed -i 's/int sse/struct sched_entity *se/g' include/linux/ems.h
 
-        # 3. Fix Memory Boosting Conflict
-        # We remove the local definition in vmscan.c so it uses the one in the header
-        # We use a range-based sed to delete the specific function block
+        # 3. Fix need_memory_boosting Conflict
+        # Step A: Delete the local definition in vmscan.c so it stops clashing
         sed -i '/inline bool need_memory_boosting(void)/,/}/d' mm/vmscan.c
-        # Now provide the global definition safely
+        # Step B: Provide the global definition in the main header
         sed -i 's/extern inline bool need_memory_boosting(void);/static inline bool need_memory_boosting(void) { return false; }/g' include/linux/mm.h
 
         # 4. Global Warning Suppression
@@ -38,7 +37,7 @@ jobs:
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror=/-W/g' {} +
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror\b//g' {} +
 
-        # 5. Samsung SecDebug Fix
+        # 5. Samsung Debug Fix
         sed -i 's|#define secdbg_exin_get_unfz(a).*|#define secdbg_exin_get_unfz(a) ("")|' include/linux/sec_debug.h || true
 
     - name: Integrate KernelSU
@@ -65,6 +64,7 @@ jobs:
         
         make O=out ARCH=arm64 $CONF_NAME
         
+        # Proper config via script
         ./scripts/config --file out/.config --enable KSU
         ./scripts/config --file out/.config --disable MODULE_SIG
         ./scripts/config --file out/.config --disable MODULE_SIG_ALL
