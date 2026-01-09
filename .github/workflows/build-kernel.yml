@@ -1,7 +1,120 @@
-name: Test Manual Run
-on: workflow_dispatch
+name: Build Kernel for A135F
+
+on:
+  workflow_dispatch:
+
 jobs:
-  test:
-    runs-on: ubuntu-latest
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+
     steps:
-      - run: echo "It works!"
+      - name: Setup
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3
+
+      - name: Clone Kernel
+        run: |
+          git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+
+      - name: Apply Fixes
+        run: |
+          cd kernel
+
+          # Fix watchdog.c - remove Samsung softlockup block
+          if [ -f kernel/watchdog.c ]; then
+            sed -i '/^#ifdef CONFIG_SOFTLOCKUP_DETECTOR$/,/^#endif$/d' kernel/watchdog.c
+            sed -i '/percpu_sl_info\|sl_to_name\|check_softlockup_type/d' kernel/watchdog.c
+          fi
+
+          # Stub need_memory_boosting
+          echo '#ifndef need_memory_boosting
+static inline bool need_memory_boosting(void) { return false; }
+#endif' >> include/linux/mm.h
+
+          # Remove problematic subsystems
+          rm -rf kernel/sched/ems/ drivers/soc/samsung/bts/ drivers/staging/sec_debug/ kernel/trace/sec/
+
+          # Minor cleanups
+          sed -i 's/static inline __printf(1, 0)/static __noinline __printf(1, 0)/' kernel/trace/bpf_trace.c 2>/dev/null || true
+          sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused *sys_state[SYSTEM_END] = {/' kernel/power/process.c 2>/dev/null || true
+
+      - name: Add KernelSU
+        run: |
+          cd kernel
+          git clone https://github.com/tiann/KernelSU ksu --depth=1
+          mv ksu/kernel drivers/kernelsu
+          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+          echo 'obj-y += kernelsu/' >> drivers/Makefile
+
+      - name: Configure
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          mkdir -p out
+
+          make O=out ARCH=arm64 defconfig
+
+          chmod +x scripts/config
+          ./scripts/config --file out/.config --enable KSU
+          ./scripts/config --file out/.config --set-str KSU_GIT_VERSION "gh-action"
+          ./scripts/config --file out/.config --disable MODULE_SIG MODULE_SIG_ALL MODULE_SIG_FORCE
+          ./scripts/config --file out/.config --disable SEC_DEBUG EXYNOS_BTS SCHED_EMS DEVFREQ_GOV_SIMPLE_ONDEMAND
+
+          echo "CONFIG_GKI_KERNEL=y" >> out/.config
+          make O=out ARCH=arm64 olddefconfig
+
+      - name: Build
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          export KCFLAGS="-w -Wno-error"
+
+          make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log
+
+          if [ ! -f out/arch/arm64/boot/Image ]; then
+            echo "❌ Build failed or Image missing"
+            exit 1
+          fi
+          echo "✅ Kernel built!"
+
+      - name: Package
+        run: |
+          cd kernel
+          wget -q https://github.com/osm0sis/AnyKernel3/archive/master.zip -O ak3.zip
+          unzip -q ak3.zip
+          mv AnyKernel3-master anykernel
+          cp out/arch/arm64/boot/Image anykernel/
+
+          cat > anykernel/anykernel.sh << 'EOF'
+#!/system/bin/sh
+properties() {
+kernel.string=A135F-GKI-Kernel
+do.devicecheck=1
+do.modules=0
+do.systemless=1
+device.name1=a13
+device.name2=a135f
+}
+block=/dev/block/by-name/boot;
+is_slot_device=0;
+ramdisk_compression=auto;
+. tools/ak3-core.sh;
+dump_boot;
+write_boot;
+EOF
+
+          chmod +x anykernel/anykernel.sh
+          cd anykernel
+          zip -r9 ../A135F-Kernel-$(date +%Y%m%d).zip .
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel
+          path: |
+            kernel/out/arch/arm64/boot/Image
+            kernel/A135F-Kernel-*.zip
