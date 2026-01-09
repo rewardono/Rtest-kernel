@@ -1,7 +1,6 @@
 name: Build GKI-like Kernel for Galaxy A135F
 
 on:
-  # Allows manual trigger from GitHub Actions tab
   workflow_dispatch:
 
 jobs:
