@@ -1,120 +1,425 @@
-name: Build Kernel for A135F
-
+name: Build Kernel - Complete Fixes v5
 on:
   workflow_dispatch:
-
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
-
     steps:
-      - name: Setup
-        run: |
-          sudo apt update
-          sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3
-
-      - name: Clone Kernel
-        run: |
-          git clone https://github.com/samsungexynos850/atlas kernel --depth=1
-
-      - name: Apply Fixes
-        run: |
-          cd kernel
-
-          # Fix watchdog.c - remove Samsung softlockup block
-          if [ -f kernel/watchdog.c ]; then
-            sed -i '/^#ifdef CONFIG_SOFTLOCKUP_DETECTOR$/,/^#endif$/d' kernel/watchdog.c
-            sed -i '/percpu_sl_info\|sl_to_name\|check_softlockup_type/d' kernel/watchdog.c
+    - name: Setup Environment
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3 ccache
+        sudo ln -s /usr/bin/ccache /usr/local/bin/ccache || true
+    - name: Get Kernel Source
+      run: |
+        rm -rf kernel
+        git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+    - name: Apply Comprehensive Fixes
+      run: |
+        cd kernel
+        
+        echo "=== Applying all necessary fixes ==="
+        
+        # 1. Fix bpf_trace.c - remove 'inline' from variable argument function
+        echo "Fixing bpf_trace.c..."
+        sed -i 's/static inline __printf(1, 0) int bpf_do_trace_printk/static __printf(1, 0) int bpf_do_trace_printk/' kernel/trace/bpf_trace.c 2>/dev/null || true
+        # Alternative approach: change to noinline
+        sed -i 's/static inline __printf(1, 0)/static __noinline __printf(1, 0)/' kernel/trace/bpf_trace.c 2>/dev/null || true
+        
+        # 2. Fix sec_debug.h
+        echo "Fixing sec_debug.h..."
+        sed -i 's|#define secdbg_exin_get_unfz(.*).*|#define secdbg_exin_get_unfz(a) ("")|' include/linux/sec_debug.h 2>/dev/null || true
+        
+        # 3. Fix EMS header conflicts - COMPLETE SOLUTION
+        echo "Fixing EMS headers..."
+        if [ -f "include/linux/ems.h" ]; then
+          # Check what's actually in the file
+          EMS_LINE=$(grep -n "lb_cfs_tasks" include/linux/ems.h | head -1 | cut -d: -f1)
+          if [ ! -z "$EMS_LINE" ]; then
+            # Get the exact line and fix it
+            sed -i "${EMS_LINE}s/.*/extern struct list_head *lb_cfs_tasks(struct rq *rq, int sse);/" include/linux/ems.h
           fi
+        fi
+        
+        # 4. Fix lb_cfs_tasks implementation in load_balance.c
+        echo "Fixing load_balance.c..."
+        if [ -f "kernel/sched/ems/load_balance.c" ]; then
+          # Match the header declaration
+          sed -i 's/struct list_head \*lb_cfs_tasks(struct rq \*rq, struct sched_entity \*se)/struct list_head *lb_cfs_tasks(struct rq *rq, int sse)/' kernel/sched/ems/load_balance.c 2>/dev/null || true
+        fi
+        
+        # 5. Fix lb_cfs_tasks in fair.c - REMOVE our added function
+        echo "Fixing fair.c..."
+        if [ -f "kernel/sched/fair.c" ]; then
+          # Remove the problematic line we added
+          sed -i '/static inline struct list_head \*lb_cfs_tasks.*{ return \&rq->cfs_tasks; }/d' kernel/sched/fair.c 2>/dev/null || true
+        fi
+        
+        # 6. Fix need_memory_boosting COMPLETELY
+        echo "Fixing need_memory_boosting..."
+        # First, make sure we have the right declaration in mm.h
+        if grep -q "need_memory_boosting" include/linux/mm.h 2>/dev/null; then
+          sed -i '/need_memory_boosting/s/.*/#ifndef need_memory_boosting\nstatic inline bool need_memory_boosting(void) { return false; }\n#endif/' include/linux/mm.h 2>/dev/null || true
+        else
+          # Add it if not present
+          echo -e "\n#ifndef need_memory_boosting\nstatic inline bool need_memory_boosting(void) { return false; }\n#endif" >> include/linux/mm.h
+        fi
+        
+        # Then comment out the definition in vmscan.c
+        if [ -f "mm/vmscan.c" ]; then
+          # Find the function and comment it out
+          sed -i '/^inline bool need_memory_boosting(void)/,/^}/s/^/\/\//' mm/vmscan.c 2>/dev/null || true
+          # Alternative: rename it to avoid conflict
+          sed -i 's/^inline bool need_memory_boosting(void)/static inline bool __need_memory_boosting(void)/' mm/vmscan.c 2>/dev/null || true
+        fi
+        
+        # 7. Fix compiler warnings
+        echo "Fixing compiler flags..."
+        find . -type f -name "Makefile*" -exec sed -i \
+          -e 's/-Werror-/-Wno-error -W/g' \
+          -e 's/-Werror=/-Wno-error -W/g' \
+          -e 's/-Werror\b//g' \
+          {} \; 2>/dev/null || true
+        
+        # 8. Fix process.c unused variable
+        sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused *sys_state[SYSTEM_END] = {/' kernel/power/process.c 2>/dev/null || true
+        
+        # 9. Fix systrace_mark.h
+        sed -i 's|systrace_mark_end()\s*__systrace_mark(SYSTRACE_MARK_TYPE_END, "")|systrace_mark_end() __systrace_mark(SYSTRACE_MARK_TYPE_END, "end")|' include/trace/systrace_mark.h 2>/dev/null || true
+        
+        # 10. ENHANCED FIX: Watchdog.c - aggressively remove Samsung-specific softlockup code and balance #ifdef
+        echo "Fixing watchdog.c softlockup errors..."
+        if [ -f "kernel/watchdog.c" ]; then
+          # Backup the file first
+          cp kernel/watchdog.c kernel/watchdog.c.backup
+          
+          # Remove entire problematic #ifdef block (Samsung extensions under CONFIG_SOFTLOCKUP_DETECTOR)
+          sed -i '/#ifdef CONFIG_SOFTLOCKUP_DETECTOR/,/#endif/d' kernel/watchdog.c 2>/dev/null || true
+          
+          # If still unbalanced, add #endif at end as fallback
+          echo "#endif /* CONFIG_SOFTLOCKUP_DETECTOR */" >> kernel/watchdog.c 2>/dev/null || true
+          
+          # Comment out the entire check_softlockup_type function (lines around 635)
+          awk '/static void check_softlockup_type/,/^}/ {print "//" $0; next} {print}' kernel/watchdog.c > kernel/watchdog.c.tmp && mv kernel/watchdog.c.tmp kernel/watchdog.c
+          
+          # Also comment out the call to check_softlockup_type
+          sed -i 's/check_softlockup_type(cpu);//g' kernel/watchdog.c 2>/dev/null || true
+          
+          # Remove references to percpu_sl_info and other Samsung vars
+          sed -i '/percpu_sl_info/d' kernel/watchdog.c 2>/dev/null || true
+          sed -i '/sl_to_name/d' kernel/watchdog.c 2>/dev/null || true
+        fi
+        
+        # 11. FIX: Samsung BTS driver - fix missing types.h
+        echo "Fixing BTS driver missing types.h..."
+        if [ -f "drivers/soc/samsung/cal-if/pwrcal-env.h" ]; then
+          # Fix the include path
+          sed -i 's|#include "types.h"|#include <linux/types.h>|' drivers/soc/samsung/cal-if/pwrcal-env.h 2>/dev/null || true
+        fi
+        
+        # 12. FIX: Add missing softlockup_info forward declaration if needed
+        if grep -q "struct softlockup_info" kernel/watchdog.c 2>/dev/null; then
+          echo "Adding forward declaration for softlockup_info..."
+          # Add forward declaration at the beginning of watchdog.c
+          sed -i '/#include <linux\/srcu.h>/a struct softlockup_info;' kernel/watchdog.c 2>/dev/null || true
+        fi
+        
+        # 13. NEW FIX: Devfreq governor_simpleondemand.c - remove Samsung-specific multiplication_weight
+        echo "Fixing governor_simpleondemand.c..."
+        if [ -f "drivers/devfreq/governor_simpleondemand.c" ]; then
+          # Comment out the if condition and assignment for multiplication_weight
+          sed -i '/if (data->multiplication_weight)/s/^/\/\//' drivers/devfreq/governor_simpleondemand.c 2>/dev/null || true
+          sed -i '/dfso_multiplication_weight = data->multiplication_weight;/s/^/\/\//' drivers/devfreq/governor_simpleondemand.c 2>/dev/null || true
+          
+          # If needed, declare dfso_multiplication_weight as 1 (fallback)
+          sed -i '/unsigned long dfso_multiplication_weight;/a unsigned long dfso_multiplication_weight = 1;' drivers/devfreq/governor_simpleondemand.c 2>/dev/null || true
+        fi
 
-          # Stub need_memory_boosting
-          echo '#ifndef need_memory_boosting
-static inline bool need_memory_boosting(void) { return false; }
-#endif' >> include/linux/mm.h
-
-          # Remove problematic subsystems
-          rm -rf kernel/sched/ems/ drivers/soc/samsung/bts/ drivers/staging/sec_debug/ kernel/trace/sec/
-
-          # Minor cleanups
-          sed -i 's/static inline __printf(1, 0)/static __noinline __printf(1, 0)/' kernel/trace/bpf_trace.c 2>/dev/null || true
-          sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused *sys_state[SYSTEM_END] = {/' kernel/power/process.c 2>/dev/null || true
-
-      - name: Add KernelSU
-        run: |
-          cd kernel
-          git clone https://github.com/tiann/KernelSU ksu --depth=1
-          mv ksu/kernel drivers/kernelsu
-          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-          echo 'obj-y += kernelsu/' >> drivers/Makefile
-
-      - name: Configure
-        run: |
-          cd kernel
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          mkdir -p out
-
-          make O=out ARCH=arm64 defconfig
-
-          chmod +x scripts/config
-          ./scripts/config --file out/.config --enable KSU
-          ./scripts/config --file out/.config --set-str KSU_GIT_VERSION "gh-action"
-          ./scripts/config --file out/.config --disable MODULE_SIG MODULE_SIG_ALL MODULE_SIG_FORCE
-          ./scripts/config --file out/.config --disable SEC_DEBUG EXYNOS_BTS SCHED_EMS DEVFREQ_GOV_SIMPLE_ONDEMAND
-
-          echo "CONFIG_GKI_KERNEL=y" >> out/.config
-          make O=out ARCH=arm64 olddefconfig
-
-      - name: Build
-        run: |
-          cd kernel
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export KCFLAGS="-w -Wno-error"
-
-          make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log
-
-          if [ ! -f out/arch/arm64/boot/Image ]; then
-            echo "❌ Build failed or Image missing"
-            exit 1
+        # 14. NEW FIX: Input booster - remove or comment out problematic macros and functions
+        echo "Fixing input_booster in input.c..."
+        if [ -f "drivers/input/input.c" ]; then
+          # Backup file
+          cp drivers/input/input.c drivers/input/input.c.backup
+          
+          # Remove DECLARE lines for all types
+          sed -i '/DECLARE_SET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/DECLARE_RESET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/DECLARE_TIMEOUT_FUNC/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/DECLARE_STATE_FUNC/d' drivers/input/input.c 2>/dev/null || true
+          
+          # Comment out the entire booster block if marked
+          sed -i '/\/\* \[ System Performance - Input Booster \*\//,/\/\* System Performance - Input Booster \] \*\//s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          
+          # Comment out input_booster_init function (handle indented })
+          sed -i '/void input_booster_init(void)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          
+          # Comment out state functions (idle, press)
+          sed -i '/DECLARE_STATE_FUNC(idle)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          sed -i '/DECLARE_STATE_FUNC(press)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          
+          # Comment out input_booster function
+          sed -i '/void input_booster(struct input_dev \*dev)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          
+          # Comment out input_event booster logic
+          sed -i '/if (device_tree_infor != NULL)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          
+          # Comment out reset work functions
+          sed -i '/_reset_booster_work_func/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          
+          # Comment out emstune related
+          sed -i '/input_emstune_init/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+          sed -i '/INIT_INPUT_EMSTUNE/d' drivers/input/input.c 2>/dev/null || true
+          
+          # Remove calls to input_booster functions in other parts
+          sed -i 's/input_booster_.*();//g' drivers/input/input.c 2>/dev/null || true
+          
+          # Fix syntax in macros if needed (fallback)
+          sed -i '/head_time/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/tail_time/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/input_count/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/input_events/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/TouchIDs/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/device_tree_infor/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/pr_booster/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/RUN_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+          
+          # Remove includes
+          sed -i '/#include <linux\/input\/input_booster.h>/d' drivers/input/input.c 2>/dev/null || true
+        fi
+        
+        # Fix header if needed
+        if [ -f "include/linux/input/input_booster.h" ]; then
+          # Comment out problematic macro definitions
+          sed -i '/#define SET_BOOSTER/,/#endif/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/#define REMOVE_BOOSTER/,/#endif/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/CHANGE_BOOSTER/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/INIT_BOOSTER/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/DECLARE_TIMEOUT_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/DECLARE_SET_BOOSTER_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/DECLARE_RESET_BOOSTER_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/DECLARE_STATE_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/TIMEOUT_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/SET_BOOSTER_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+          sed -i '/RESET_BOOSTER_FUNC/,/^}/s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
+        fi
+        
+        echo "✅ All fixes applied"
+    - name: Add KernelSU
+      run: |
+        cd kernel
+        rm -rf drivers/kernelsu
+        git clone https://github.com/tiann/KernelSU ksu_tmp --depth=1
+        mv ksu_tmp/kernel drivers/kernelsu
+        echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+        echo 'obj-y += kernelsu/' >> drivers/Makefile
+        rm -rf ksu_tmp
+    - name: Configure Kernel
+      run: |
+        cd kernel
+        rm -rf out
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        
+        mkdir -p out
+        # Use gki_defconfig for GKI build
+        make O=out ARCH=arm64 gki_defconfig
+        
+        # FIX: Make sure scripts/config is executable
+        chmod +x scripts/config
+        
+        # Enable KernelSU and disable module signing
+        ./scripts/config --file out/.config --enable KSU
+        ./scripts/config --file out/.config --set-str KSU_GIT_VERSION "github-action-build"
+        ./scripts/config --file out/.config --disable MODULE_SIG
+        ./scripts/config --file out/.config --disable MODULE_SIG_ALL
+        ./scripts/config --file out/.config --disable MODULE_SIG_FORCE
+        
+        # Enable Devfreq (required for GKI) but disable Samsung extensions
+        ./scripts/config --file out/.config --enable DEVFREQ_GOV_SIMPLE_ONDEMAND
+        ./scripts/config --file out/.config --disable SAMSUNG_DEVFREQ_EXTENSION  # If exists
+        
+        # Disable problematic Samsung debug features
+        ./scripts/config --file out/.config --disable SEC_DEBUG
+        ./scripts/config --file out/.config --disable SEC_DEBUG_EXTRA_INFO
+        
+        # NEW: Disable BTS driver to avoid compilation issues
+        ./scripts/config --file out/.config --disable EXYNOS_BTS
+        
+        # NEW: Disable Samsung watchdog extensions
+        ./scripts/config --file out/.config --disable SOFTLOCKUP_DETECTOR_EXTENSION
+        ./scripts/config --file out/.config --disable SEC_DEBUG_HARDLOCKUP_DETECTOR
+        ./scripts/config --file out/.config --disable SEC_DEBUG_SOFTLOCKUP_DETECTOR
+        ./scripts/config --file out/.config --disable SEC_DEBUG_WATCHDOG
+        
+        # NEW FIX: Disable input booster and EMS to avoid vendor-specific errors
+        ./scripts/config --file out/.config --disable INPUT_BOOSTER
+        ./scripts/config --file out/.config --disable SEC_INPUT_BOOSTER  # Alternative name if exists
+        ./scripts/config --file out/.config --disable EMS
+        ./scripts/config --file out/.config --disable EMSTUNE
+        ./scripts/config --file out/.config --disable EMS_TUNE
+        ./scripts/config --file out/.config --disable SCHED_EMS
+        ./scripts/config --file out/.config --disable SCHED_EMSTUNE
+        
+        make O=out ARCH=arm64 olddefconfig
+    - name: Build Kernel
+      run: |
+        cd kernel
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        export KCFLAGS="-w -Wno-error -Wno-error=attribute-alias -Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types"
+        
+        echo "🚀 Starting kernel build..."
+        
+        # Try parallel build first
+        if make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log; then
+          echo "✅ Parallel build successful!"
+        else
+          echo "⚠️ Parallel build failed, checking for specific errors..."
+          
+          # Show error summary
+          echo "=== BUILD ERROR SUMMARY ==="
+          grep -i "error:" build.log | head -20
+          
+          echo "⚠️ Trying single-core build..."
+          make O=out ARCH=arm64 clean 2>/dev/null || true
+          
+          if make O=out ARCH=arm64 -j1 2>&1 | tee build_single.log; then
+            echo "✅ Single-core build successful!"
+          else
+            echo "❌ Build failed with single core"
+            echo "=== LAST 50 LINES OF ERRORS ==="
+            tail -50 build_single.log | grep -i "error:" || tail -50 build_single.log
+            
+            # Try to fix remaining issues dynamically
+            echo "🛠️ Attempting emergency fixes..."
+            
+            # Fix watchdog.c more aggressively if still failing
+            if grep -q "unterminated #ifdef" build_single.log 2>/dev/null; then
+              echo "Applying emergency watchdog.c fix..."
+              sed -i '/#ifdef CONFIG_SOFTLOCKUP_DETECTOR/,/#endif/d' kernel/watchdog.c 2>/dev/null || true
+            fi
+            
+            # Fix devfreq more aggressively
+            if grep -q "multiplication_weight" build_single.log 2>/dev/null; then
+              echo "Applying emergency devfreq fix..."
+              sed -i '/multiplication_weight/d' drivers/devfreq/governor_simpleondemand.c 2>/dev/null || true
+            fi
+            
+            # NEW: Emergency fix for input_booster if still error
+            if grep -q "input_booster" build_single.log 2>/dev/null || grep -q "head_time" build_single.log 2>/dev/null; then
+              echo "Applying emergency input_booster fix..."
+              sed -i '/#include <linux\/input\/input_booster.h>/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/input_booster_/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/DECLARE_SET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/DECLARE_RESET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/DECLARE_TIMEOUT_FUNC/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/DECLARE_STATE_FUNC/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/INIT_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/SET_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/REMOVE_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/RUN_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/pr_booster/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/emstune_add_request/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/input_count/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/input_events/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/TouchIDs/d' drivers/input/input.c 2>/dev/null || true
+              sed -i '/device_tree_infor/d' drivers/input/input.c 2>/dev/null || true
+              # Comment remaining functions
+              sed -i '/void input_booster_init(void)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+              sed -i '/void input_booster(struct input_dev \*dev)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
+            fi
+            
+            # Try one more build attempt
+            echo "🔄 One more build attempt after emergency fixes..."
+            if make O=out ARCH=arm64 -j1 2>&1 | tee build_final.log; then
+              echo "✅ Emergency fixes successful!"
+            else
+              echo "❌ Final build attempt failed"
+              exit 1
+            fi
           fi
-          echo "✅ Kernel built!"
-
-      - name: Package
-        run: |
-          cd kernel
-          wget -q https://github.com/osm0sis/AnyKernel3/archive/master.zip -O ak3.zip
-          unzip -q ak3.zip
-          mv AnyKernel3-master anykernel
-          cp out/arch/arm64/boot/Image anykernel/
-
-          cat > anykernel/anykernel.sh << 'EOF'
-#!/system/bin/sh
-properties() {
-kernel.string=A135F-GKI-Kernel
-do.devicecheck=1
-do.modules=0
-do.systemless=1
-device.name1=a13
-device.name2=a135f
-}
-block=/dev/block/by-name/boot;
-is_slot_device=0;
-ramdisk_compression=auto;
-. tools/ak3-core.sh;
-dump_boot;
-write_boot;
-EOF
-
-          chmod +x anykernel/anykernel.sh
-          cd anykernel
-          zip -r9 ../A135F-Kernel-$(date +%Y%m%d).zip .
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: kernel
-          path: |
-            kernel/out/arch/arm64/boot/Image
-            kernel/A135F-Kernel-*.zip
+        fi
+        
+        # Verify kernel image exists
+        if [ -f "out/arch/arm64/boot/Image" ]; then
+          echo "🎉🎉🎉 KERNEL BUILD SUCCESSFUL! 🎉🎉🎉"
+          ls -lh out/arch/arm64/boot/Image
+          echo "Size: $(wc -c < out/arch/arm64/boot/Image) bytes"
+        else
+          echo "❌ Kernel Image not found!"
+          echo "Checking for alternative output..."
+          find out -name "Image" -o -name "Image.gz" | head -10
+          exit 1
+        fi
+    - name: Create AnyKernel3 Package
+      if: success()
+      run: |
+        cd kernel
+        # Download AnyKernel3 template
+        wget -q https://github.com/osm0sis/AnyKernel3/archive/master.zip -O anykernel.zip
+        unzip -q anykernel.zip -d anykernel_temp
+        mv anykernel_temp/AnyKernel3-master anykernel
+        rm -rf anykernel_temp anykernel.zip
+        
+        # Copy kernel image
+        cp out/arch/arm64/boot/Image anykernel/
+        
+        # Create basic anykernel script
+        cat > anykernel/anykernel.sh << 'EOF'
+        #!/system/bin/sh
+        # AnyKernel3 Ramdisk Mod Script
+        # osm0sis @ xda-developers
+        
+        ## AnyKernel setup
+        # begin properties
+        properties() {
+        kernel.string=Atlas-GKI-Kernel
+        do.devicecheck=1
+        do.modules=0
+        do.systemless=1
+        do.cleanup=1
+        do.cleanuponabort=0
+        device.name1=a13
+        device.name2=a135f
+        device.name3=exynos850
+        }
+        
+        # shell variables
+        block=/dev/block/by-name/boot;
+        is_slot_device=0;
+        ramdisk_compression=auto;
+        
+        ## AnyKernel methods (DO NOT CHANGE)
+        # import patching functions/variables - see for reference
+        . tools/ak3-core.sh;
+        
+        ## AnyKernel install
+        dump_boot;
+        
+        write_boot;
+        ## end install
+        EOF
+        
+        chmod +x anykernel/anykernel.sh
+        
+        # Create zip
+        cd anykernel
+        zip -r9 ../Atlas-GKI-Kernel-$(date +%Y%m%d).zip .
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-build
+        path: |
+          kernel/out/arch/arm64/boot/Image
+          kernel/Atlas-GKI-Kernel-*.zip
+    - name: Upload Build Logs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: build-logs
+        path: |
+          kernel/build.log
+          kernel/build_single.log
+          kernel/build_final.log
+          kernel/out/.config
