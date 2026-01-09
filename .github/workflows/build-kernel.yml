@@ -152,3 +152,14 @@ EOF
           path: |
             kernel/out/arch/arm64/boot/Image
             kernel/kernel.zip
+          retention-days: 7
+
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Build-Logs
+          path: |
+            kernel/build.log
+            kernel/build_single.log
+          retention-days: 3
