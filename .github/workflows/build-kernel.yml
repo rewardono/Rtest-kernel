@@ -1,4 +1,4 @@
-name: Atlas Kernel - EMS Type Fix
+name: Atlas Kernel - Permission & EMS Fix
 on:
   workflow_dispatch:
 
@@ -22,14 +22,13 @@ jobs:
         # 1. Fix bpf_trace.c (Remove 'inline' from variadic function)
         sed -i 's/static inline __printf(1, 0) int bpf_do_trace_printk/static __printf(1, 0) int bpf_do_trace_printk/g' kernel/trace/bpf_trace.c
         
-        # 2. Fix lb_cfs_tasks (Match the EMS 'int' signature)
-        # We inject a version that returns the standard cfs_tasks list to prevent null pointer dereferences
+        # 2. Fix lb_cfs_tasks (Match the Samsung EMS 'int' signature)
         sed -i '1i struct rq; static inline struct list_head *lb_cfs_tasks(struct rq *rq, int sse) { return &rq->cfs_tasks; }' kernel/sched/fair.c
         
         # 3. Fix need_memory_boosting (Provide a full body in the header)
         sed -i 's/extern inline bool need_memory_boosting(void);/static inline bool need_memory_boosting(void) { return false; }/g' include/linux/mm.h
 
-        # 4. FIX COMPILER FLAGS (The 'Warning instead of Error' approach)
+        # 4. Global Warning Suppression (Turn Errors into Warnings)
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror-/-W/g' {} +
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror=/-W/g' {} +
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror\b//g' {} +
@@ -55,15 +54,17 @@ jobs:
         export KCFLAGS="-w -Wno-error"
         mkdir -p out
 
+        # Fix script permissions
+        chmod +x scripts/config
+        
         CONF_NAME=$(ls arch/arm64/configs/ | grep -E 'a13|3830|exynos850' | head -n 1)
         
         make O=out ARCH=arm64 $CONF_NAME
         
-        # Configure KSU and Disable problematic debugs
-        scripts/config --file out/.config --enable KSU
-        scripts/config --file out/.config --disable MODULE_SIG
-        scripts/config --file out/.config --disable MODULE_SIG_ALL
-        scripts/config --file out/.config --disable SEC_DEBUG
+        # Now using the script with proper permissions
+        ./scripts/config --file out/.config --enable KSU
+        ./scripts/config --file out/.config --disable MODULE_SIG
+        ./scripts/config --file out/.config --disable MODULE_SIG_ALL
         
         make O=out ARCH=arm64 olddefconfig
         make O=out ARCH=arm64 -j$(nproc)
@@ -71,5 +72,5 @@ jobs:
     - name: Upload Kernel
       uses: actions/upload-artifact@v4
       with:
-        name: Atlas-A135F-Final
+        name: Atlas-A135F-Build
         path: kernel/out/arch/arm64/boot/Image
