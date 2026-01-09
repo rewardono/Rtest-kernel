@@ -115,6 +115,9 @@ jobs:
         # Use gki_defconfig for GKI build
         make O=out ARCH=arm64 gki_defconfig
         
+        # FIX: Make sure scripts/config is executable
+        chmod +x scripts/config
+        
         # Enable KernelSU and disable module signing
         ./scripts/config --file out/.config --enable KSU
         ./scripts/config --file out/.config --set-str KSU_GIT_VERSION "github-action-build"
