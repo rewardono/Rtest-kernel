@@ -1,165 +1,80 @@
-name: Build GKI Kernel for Samsung A135F - SEC_DEBUG FIX
+name: Build GKI Kernel
+
 on:
   workflow_dispatch:
+    inputs:
+      debug:
+        description: 'Run with debug logging'
+        required: false
+        default: false
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
-
+    
     steps:
-      - name: Install Dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            build-essential \
-            bc \
-            bison \
-            flex \
-            libssl-dev \
-            libelf-dev \
-            git \
-            wget \
-            gcc-aarch64-linux-gnu \
-            g++-aarch64-linux-gnu
-
-      - name: Get Kernel Source
-        run: |
-          rm -rf kernel
-          git clone https://github.com/samsungexynos850/atlas kernel --depth=1
-
-      - name: Apply ALL Necessary Fixes
-        run: |
-          cd kernel
-          
-          echo "=== Applying all fixes ==="
-          
-          # 1. Fix the sec_debug.h macro issue
-          echo "Fixing sec_debug.h macro..."
-          if [ -f "include/linux/sec_debug.h" ]; then
-            # Change the problematic macro to return empty string
-            sed -i 's/#define secdbg_exin_get_unfz(a).*/#define secdbg_exin_get_unfz(a) ("")/' include/linux/sec_debug.h
-            echo "✅ Fixed sec_debug.h"
-          fi
-          
-          # 2. Fix unused variable warning
-          sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c 2>/dev/null || true
-          
-          # 3. Fix compiler flags in all Makefiles
-          find . -type f \( -name "Makefile*" -o -name "Kbuild*" \) -exec sed -i \
-            -e 's/-Werror-Wreturn-type/-Werror -Wreturn-type/g' \
-            -e 's/-Werror-Wimplicit-function-declaration/-Werror -Wimplicit-function-declaration/g' \
-            {} \; 2>/dev/null || true
-          
-          echo "✅ All fixes applied"
-
-      - name: Add KernelSU
-        run: |
-          cd kernel
-          rm -rf drivers/kernelsu 2>/dev/null || true
-          wget -q https://github.com/tiann/KernelSU/archive/main.tar.gz -O ksu.tar.gz
-          tar -xzf ksu.tar.gz
-          mv KernelSU-main/kernel drivers/kernelsu
-          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-          echo 'obj-y += kernelsu/' >> drivers/Makefile
-          rm -rf KernelSU-main ksu.tar.gz
-
-      - name: Configure Kernel
-        run: |
-          cd kernel
-          rm -rf out
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export HOSTCC=gcc
-          export HOSTCXX=g++
-          
-          mkdir -p out
-          make O=out ARCH=arm64 gki_defconfig
-          
-          # Enable KernelSU
-          echo "CONFIG_KSU=y" >> out/.config
-          echo "CONFIG_MODULES=y" >> out/.config
-          
-          # Disable Werror if possible
-          echo "# CONFIG_WERROR is not set" >> out/.config
-          
-          make O=out ARCH=arm64 olddefconfig
-
-      - name: Fix Generated Files
-        run: |
-          cd kernel
-          # Fix any remaining bad flags in generated files
-          find out -type f -name "Makefile*" -exec sed -i \
-            -e 's/-Werror-Wreturn-type/-Wreturn-type/g' \
-            -e 's/-Werror-Wimplicit-function-declaration/-Wimplicit-function-declaration/g' \
-            {} \; 2>/dev/null || true
-
-      - name: Build Kernel
-        run: |
-          cd kernel
-          export ARCH=arm64
-          export CROSS_COMPILE=aarch64-linux-gnu-
-          export HOSTCC=gcc
-          export HOSTCXX=g++
-          
-          echo "🚀 Building kernel..."
-          
-          # Build with KCFLAGS to disable warnings as errors
-          if make O=out ARCH=arm64 KCFLAGS="-Wno-error" -j$(nproc) 2>&1 | tee build.log; then
-            echo "✅ Build successful!"
-          else
-            echo "⚠️ Parallel build failed, trying single core..."
-            make O=out ARCH=arm64 clean 2>/dev/null || true
-            make O=out ARCH=arm64 KCFLAGS="-Wno-error" -j1 2>&1 | tee build_single.log || {
-              echo "❌ Build failed"
-              tail -100 build_single.log
-              exit 1
-            }
-          fi
-          
-          # Check for kernel
-          if [ -f "out/arch/arm64/boot/Image" ]; then
-            echo "🎉🎉🎉 KERNEL BUILT SUCCESSFULLY! 🎉🎉🎉"
-            ls -lh out/arch/arm64/boot/Image
-          else
-            echo "❌ Kernel Image not found"
-            exit 1
-          fi
-
-      - name: Create Flashable Package
-        if: success()
-        run: |
-          cd kernel
-          mkdir -p anykernel
-          cp out/arch/arm64/boot/Image anykernel/
-          
-          cat > anykernel/anykernel.sh << 'EOF'
-#!/system/bin/sh
-ui_print "GKI Kernel for A135F with KernelSU"
-ui_print "Build successful!"
-dd if=/tmp/anykernel/Image of=/dev/block/by-name/boot
-ui_print "Done!"
-EOF
-          
-          chmod +x anykernel/anykernel.sh
-          cd anykernel
-          zip -r9 ../kernel.zip *
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: Kernel-Build
-          path: |
-            kernel/out/arch/arm64/boot/Image
-            kernel/kernel.zip
-          retention-days: 7
-
-      - name: Upload Build Logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Build-Logs
-          path: |
-            kernel/build.log
-            kernel/build_single.log
-          retention-days: 3
+    - name: Checkout
+      uses: actions/checkout@v4
+    
+    - name: Setup
+      run: |
+        sudo apt update
+        sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+    
+    - name: Get Kernel
+      run: |
+        git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+        cd kernel
+        
+        # Fix the sec_debug.h issue
+        sed -i 's/#define secdbg_exin_get_unfz(a).*/#define secdbg_exin_get_unfz(a) ("")/' include/linux/sec_debug.h 2>/dev/null || true
+        
+        # Fix process.c
+        sed -i '49s/const char \*sys_state\[SYSTEM_END\] = {/const char __maybe_unused \*sys_state\[SYSTEM_END\] = {/' kernel/power/process.c 2>/dev/null || true
+        
+        # Fix compiler flags
+        find . -type f -name "Makefile*" -exec sed -i 's/-Werror-Wreturn-type/-Wreturn-type/g; s/-Werror-Wimplicit-function-declaration/-Wimplicit-function-declaration/g' {} \; 2>/dev/null || true
+    
+    - name: Add KernelSU
+      run: |
+        cd kernel
+        rm -rf drivers/kernelsu
+        wget -q https://github.com/tiann/KernelSU/archive/main.tar.gz -O ksu.tar.gz
+        tar -xzf ksu.tar.gz
+        mv KernelSU-main/kernel drivers/kernelsu
+        echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+        echo 'obj-y += kernelsu/' >> drivers/Makefile
+        rm -rf KernelSU-main ksu.tar.gz
+    
+    - name: Configure
+      run: |
+        cd kernel
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        make gki_defconfig O=out
+        echo "CONFIG_KSU=y" >> out/.config
+        echo "CONFIG_MODULES=y" >> out/.config
+        make olddefconfig O=out
+    
+    - name: Build
+      run: |
+        cd kernel
+        export ARCH=arm64
+        export CROSS_COMPILE=aarch64-linux-gnu-
+        make -j$(nproc) O=out KCFLAGS="-Wno-error" || make -j1 O=out KCFLAGS="-Wno-error"
+    
+    - name: Check Output
+      run: |
+        if [ -f "kernel/out/arch/arm64/boot/Image" ]; then
+          echo "✅ Kernel built successfully!"
+          ls -lh kernel/out/arch/arm64/boot/Image
+        else
+          echo "❌ Kernel not found"
+          exit 1
+        fi
+    
+    - name: Upload
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel
+        path: kernel/out/arch/arm64/boot/Image
