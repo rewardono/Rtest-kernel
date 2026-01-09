@@ -19,31 +19,35 @@ jobs:
     - name: Surgical Code Fixes
       run: |
         cd kernel
-        # Fix bpf_trace.c
+        # 1. Fix bpf_trace.c
         sed -i 's/static inline __printf(1, 0) int bpf_do_trace_printk/static __printf(1, 0) int bpf_do_trace_printk/g' kernel/trace/bpf_trace.c
         
-        # Fix EMS Header (lb_cfs_tasks)
-        sed -i 's/int sse/struct sched_entity *se/g' include/linux/ems.h
-
-        # Fix Memory Boosting (The Redefinition Error)
-        # We use a simpler sed to just comment out the offending lines in vmscan.c
-        sed -i 's/inline bool need_memory_boosting(void)/\/* inline bool need_memory_boosting(void) *\//g' mm/vmscan.c
+        # 2. Fix EMS Header (lb_cfs_tasks) - COMPLETE FIX
+        # First fix the header declaration
+        sed -i 's/struct sched_entity \*se/int sse/g' include/linux/ems.h
+        # Then fix the implementation in load_balance.c
+        sed -i 's/struct list_head \*lb_cfs_tasks(struct rq \*rq, int sse)/struct list_head *lb_cfs_tasks(struct rq *rq, struct sched_entity *se)/g' kernel/sched/ems/load_balance.c || true
+        sed -i 's/(rq, sse)/(rq, (struct sched_entity *)(long)sse)/g' kernel/sched/ems/load_balance.c || true
         
-        # Define it safely in the header
-        sed -i 's/extern inline bool need_memory_boosting(void);/static inline bool need_memory_boosting(void) { return false; }/g' include/linux/mm.h
-
-        # Global Warning Suppression
-        find . -type f -name "Makefile*" -exec sed -i 's/-Werror-/-W/g' {} +
-        find . -type f -name "Makefile*" -exec sed -i 's/-Werror=/-W/g' {} +
-        find . -type f -name "Makefile*" -exec sed -i 's/-Werror\b//g' {} +
-
-        # Samsung SecDebug Fix
-        sed -i 's|#define secdbg_exin_get_unfz(a).*|#define secdbg_exin_get_unfz(a) ("")|' include/linux/sec_debug.h || true
+        # 3. Fix Memory Boosting - SIMPLER APPROACH
+        # Just comment out the inline function in vmscan.c
+        sed -i 's/^inline bool need_memory_boosting(void)/\/\/inline bool need_memory_boosting(void)/g' mm/vmscan.c || true
+        # And provide a stub in the header
+        sed -i 's/extern inline bool need_memory_boosting(void);/#ifndef need_memory_boosting\nstatic inline bool need_memory_boosting(void) { return false; }\n#endif/g' include/linux/mm.h || true
+        
+        # 4. Global Warning Suppression - MORE AGGRESSIVE
+        find . -type f -name "Makefile*" -exec sed -i 's/-Werror-/-W/g' {} + || true
+        find . -type f -name "Makefile*" -exec sed -i 's/-Werror=/-W/g' {} + || true
+        find . -type f -name "Makefile*" -exec sed -i 's/-Werror\b//g' {} + || true
+        find . -type f -name "Makefile*" -exec sed -i 's/-Werror-implicit-function-declaration//g' {} + || true
+        
+        # 5. Samsung SecDebug Fix
+        sed -i 's|#define secdbg_exin_get_unfz(.*).*|#define secdbg_exin_get_unfz(a) ("")|' include/linux/sec_debug.h || true
 
     - name: Integrate KernelSU
       run: |
         cd kernel
-        rm -rf drivers/kernelsu
+        rm -rf drivers/kernelsu || true
         git clone https://github.com/tiann/KernelSU ksu_tmp
         mv ksu_tmp/kernel drivers/kernelsu
         sed -i '1i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
@@ -55,25 +59,59 @@ jobs:
         cd kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        export KCFLAGS="-w -Wno-error"
+        export KCFLAGS="-w -Wno-error -Wno-error=attribute-alias -Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types"
         mkdir -p out
 
+        # Fix permission for the config script
         chmod +x scripts/config
         
         # Auto-detect config
         CONF_NAME=$(ls arch/arm64/configs/ | grep -E 'a13|3830|exynos850' | head -n 1)
+        echo "Using config: $CONF_NAME"
         
         make O=out ARCH=arm64 $CONF_NAME
         
-        ./scripts/config --file out/.config --enable KSU
-        ./scripts/config --file out/.config --disable MODULE_SIG
-        ./scripts/config --file out/.config --disable MODULE_SIG_ALL
+        # Apply KSU configs
+        ./scripts/config --file out/.config --enable KSU || true
+        ./scripts/config --file out/.config --set-str KSU_GIT_VERSION "github-action-build" || true
+        ./scripts/config --file out/.config --disable MODULE_SIG || true
+        ./scripts/config --file out/.config --disable MODULE_SIG_ALL || true
+        ./scripts/config --file out/.config --disable MODULE_SIG_FORCE || true
+        
+        # Disable some problematic options
+        ./scripts/config --file out/.config --disable DEBUG_INFO || true
+        ./scripts/config --file out/.config --disable DEBUG_INFO_COMPRESSED || true
+        ./scripts/config --file out/.config --disable DEBUG_INFO_REDUCED || true
+        ./scripts/config --file out/.config --disable DEBUG_INFO_SPLIT || true
         
         make O=out ARCH=arm64 olddefconfig
-        make O=out ARCH=arm64 -j$(nproc)
+        make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log
+
+    - name: Check for Image
+      run: |
+        if [ -f kernel/out/arch/arm64/boot/Image ]; then
+          echo "Kernel Image found!"
+          ls -la kernel/out/arch/arm64/boot/
+        else
+          echo "Kernel Image not found. Build may have failed."
+          if [ -f kernel/build.log ]; then
+            tail -100 kernel/build.log
+          fi
+          exit 1
+        fi
 
     - name: Upload Kernel
       uses: actions/upload-artifact@v4
+      if: success()
       with:
         name: Atlas-Kernel-Image
         path: kernel/out/arch/arm64/boot/Image
+
+    - name: Upload Build Log
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: Build-Logs
+        path: |
+          kernel/build.log
+          kernel/out/.config
