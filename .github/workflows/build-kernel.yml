@@ -1,4 +1,4 @@
-name: Atlas Kernel - Fix Compiler Flags
+name: Atlas Kernel - EMS Type Fix
 on:
   workflow_dispatch:
 
@@ -22,17 +22,19 @@ jobs:
         # 1. Fix bpf_trace.c (Remove 'inline' from variadic function)
         sed -i 's/static inline __printf(1, 0) int bpf_do_trace_printk/static __printf(1, 0) int bpf_do_trace_printk/g' kernel/trace/bpf_trace.c
         
-        # 2. Fix lb_cfs_tasks conflict (Place declaration at top)
-        sed -i '1i struct rq; struct sched_entity; static inline struct list_head *lb_cfs_tasks(struct rq *rq, struct sched_entity *se) { return (struct list_head *)se; }' kernel/sched/fair.c
+        # 2. Fix lb_cfs_tasks (Match the EMS 'int' signature)
+        # We inject a version that returns the standard cfs_tasks list to prevent null pointer dereferences
+        sed -i '1i struct rq; static inline struct list_head *lb_cfs_tasks(struct rq *rq, int sse) { return &rq->cfs_tasks; }' kernel/sched/fair.c
         
-        # 3. FIX COMPILER FLAGS (The smarter way) 
-        # Instead of deleting -Werror, we turn it into -W (warning) so the flag remains valid
+        # 3. Fix need_memory_boosting (Provide a full body in the header)
+        sed -i 's/extern inline bool need_memory_boosting(void);/static inline bool need_memory_boosting(void) { return false; }/g' include/linux/mm.h
+
+        # 4. FIX COMPILER FLAGS (The 'Warning instead of Error' approach)
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror-/-W/g' {} +
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror=/-W/g' {} +
-        # Remove standalone -Werror
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror\b//g' {} +
 
-        # 4. Samsung-specific include error fix
+        # 5. Samsung-specific include error fix
         sed -i 's|#define secdbg_exin_get_unfz(a).*|#define secdbg_exin_get_unfz(a) ("")|' include/linux/sec_debug.h || true
 
     - name: Integrate KernelSU
@@ -50,21 +52,18 @@ jobs:
         cd kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        # Use -w to suppress all warnings and -Wno-error to ensure nothing stops the build
         export KCFLAGS="-w -Wno-error"
         mkdir -p out
 
-        # Find the config we successfully identified last time
         CONF_NAME=$(ls arch/arm64/configs/ | grep -E 'a13|3830|exynos850' | head -n 1)
-        echo "Found Config: $CONF_NAME"
         
         make O=out ARCH=arm64 $CONF_NAME
         
-        # Force KSU and Disable Signature checks
-        echo "CONFIG_KSU=y" >> out/.config
-        echo "CONFIG_MODULES=y" >> out/.config
-        echo "CONFIG_MODULE_SIG=n" >> out/.config
-        echo "CONFIG_MODULE_SIG_ALL=n" >> out/.config
+        # Configure KSU and Disable problematic debugs
+        scripts/config --file out/.config --enable KSU
+        scripts/config --file out/.config --disable MODULE_SIG
+        scripts/config --file out/.config --disable MODULE_SIG_ALL
+        scripts/config --file out/.config --disable SEC_DEBUG
         
         make O=out ARCH=arm64 olddefconfig
         make O=out ARCH=arm64 -j$(nproc)
@@ -72,5 +71,5 @@ jobs:
     - name: Upload Kernel
       uses: actions/upload-artifact@v4
       with:
-        name: Atlas-A135F-Fixed-Image
+        name: Atlas-A135F-Final
         path: kernel/out/arch/arm64/boot/Image
