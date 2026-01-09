@@ -1,4 +1,4 @@
-name: Build Kernel - Complete Fixes
+name: Build Kernel - Complete Fixes v2
 on:
   workflow_dispatch:
 
@@ -92,6 +92,36 @@ jobs:
         # 9. Fix systrace_mark.h
         sed -i 's|systrace_mark_end()\s*__systrace_mark(SYSTRACE_MARK_TYPE_END, "")|systrace_mark_end()    __systrace_mark(SYSTRACE_MARK_TYPE_END, "end")|' include/trace/systrace_mark.h 2>/dev/null || true
         
+        # 10. FIX: Watchdog.c - remove Samsung-specific softlockup detector code
+        echo "Fixing watchdog.c softlockup errors..."
+        if [ -f "kernel/watchdog.c" ]; then
+          # Backup the file first
+          cp kernel/watchdog.c kernel/watchdog.c.backup
+          
+          # Comment out the entire check_softlockup_type function (lines around 635)
+          awk '/static void check_softlockup_type/,/^}/ {print "//" $0; next} {print}' kernel/watchdog.c > kernel/watchdog.c.tmp && mv kernel/watchdog.c.tmp kernel/watchdog.c
+          
+          # Also comment out the call to check_softlockup_type
+          sed -i 's/check_softlockup_type(cpu);//g' kernel/watchdog.c 2>/dev/null || true
+          
+          # Remove references to percpu_sl_info
+          sed -i '/percpu_sl_info/d' kernel/watchdog.c 2>/dev/null || true
+        fi
+        
+        # 11. FIX: Samsung BTS driver - fix missing types.h
+        echo "Fixing BTS driver missing types.h..."
+        if [ -f "drivers/soc/samsung/cal-if/pwrcal-env.h" ]; then
+          # Fix the include path
+          sed -i 's|#include "types.h"|#include <linux/types.h>|' drivers/soc/samsung/cal-if/pwrcal-env.h 2>/dev/null || true
+        fi
+        
+        # 12. FIX: Add missing softlockup_info forward declaration if needed
+        if grep -q "struct softlockup_info" kernel/watchdog.c 2>/dev/null; then
+          echo "Adding forward declaration for softlockup_info..."
+          # Add forward declaration at the beginning of watchdog.c
+          sed -i '/#include <linux\/srcu.h>/a struct softlockup_info;' kernel/watchdog.c 2>/dev/null || true
+        fi
+        
         echo "✅ All fixes applied"
 
     - name: Add KernelSU
@@ -129,6 +159,17 @@ jobs:
         ./scripts/config --file out/.config --disable SEC_DEBUG
         ./scripts/config --file out/.config --disable SEC_DEBUG_EXTRA_INFO
         
+        # NEW: Disable BTS driver to avoid compilation issues
+        ./scripts/config --file out/.config --disable EXYNOS_BTS
+        
+        # NEW: Disable Samsung watchdog extensions
+        ./scripts/config --file out/.config --disable SOFTLOCKUP_DETECTOR_EXTENSION
+        
+        # NEW: Disable any remaining problematic Samsung features
+        ./scripts/config --file out/.config --disable SEC_DEBUG_HARDLOCKUP_DETECTOR
+        ./scripts/config --file out/.config --disable SEC_DEBUG_SOFTLOCKUP_DETECTOR
+        ./scripts/config --file out/.config --disable SEC_DEBUG_WATCHDOG
+        
         make O=out ARCH=arm64 olddefconfig
 
     - name: Build Kernel
@@ -159,7 +200,26 @@ jobs:
             echo "❌ Build failed with single core"
             echo "=== LAST 50 LINES OF ERRORS ==="
             tail -50 build_single.log | grep -i "error:" || tail -50 build_single.log
-            exit 1
+            
+            # Try to fix remaining issues dynamically
+            echo "🛠️ Attempting emergency fixes..."
+            
+            # Fix watchdog.c more aggressively if still failing
+            if grep -q "percpu_sl_info" build_single.log 2>/dev/null; then
+              echo "Applying emergency watchdog.c fix..."
+              awk '/static void check_softlockup_type/,/^}/ {next} {print}' kernel/watchdog.c > kernel/watchdog.c.fixed && mv kernel/watchdog.c.fixed kernel/watchdog.c
+              sed -i '/percpu_sl_info/d' kernel/watchdog.c 2>/dev/null || true
+              sed -i '/sl_to_name/d' kernel/watchdog.c 2>/dev/null || true
+            fi
+            
+            # Try one more build attempt
+            echo "🔄 One more build attempt after emergency fixes..."
+            if make O=out ARCH=arm64 -j1 2>&1 | tee build_final.log; then
+              echo "✅ Emergency fixes successful!"
+            else
+              echo "❌ Final build attempt failed"
+              exit 1
+            fi
           fi
         fi
         
@@ -246,4 +306,5 @@ jobs:
         path: |
           kernel/build.log
           kernel/build_single.log
+          kernel/build_final.log
           kernel/out/.config
