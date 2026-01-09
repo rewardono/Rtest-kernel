@@ -1,4 +1,4 @@
-name: Atlas Kernel - Absolute Final Fix
+name: Atlas Kernel - Final Defconfig Fix
 on:
   workflow_dispatch:
 
@@ -10,27 +10,22 @@ jobs:
       run: |
         sudo apt update
         sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3 ccache
-        # Create a dummy ccache to satisfy Samsung's legacy Makefiles
         sudo ln -s /usr/bin/ccache /usr/local/bin/ccache || true
 
     - name: Get Kernel Source
       run: |
         git clone https://github.com/samsungexynos850/atlas kernel --depth=1
 
-    - name: Apply Surgical Fixes
+    - name: Surgical Code Fixes
       run: |
         cd kernel
-        
-        # 1. Fix bpf_trace.c (Remove 'inline' from variadic function)
+        # Fix bpf_trace.c (Remove 'inline' from variadic function)
         sed -i 's/static inline __printf(1, 0) int bpf_do_trace_printk/static __printf(1, 0) int bpf_do_trace_printk/g' kernel/trace/bpf_trace.c
-
-        # 2. Fix lb_cfs_tasks (Place declaration at the TOP, not bottom)
+        
+        # Fix lb_cfs_tasks conflict (Place declaration at top)
         sed -i '1i struct rq; struct sched_entity; static inline struct list_head *lb_cfs_tasks(struct rq *rq, struct sched_entity *se) { return (struct list_head *)se; }' kernel/sched/fair.c
-
-        # 3. Fix Samsung-specific include errors
-        sed -i 's|#define secdbg_exin_get_unfz(a).*|#define secdbg_exin_get_unfz(a) ("")|' include/linux/sec_debug.h || true
-
-        # 4. Global Warning Suppression (Prevents many "Stop" errors)
+        
+        # Global Warning Suppression
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror//g' {} +
 
     - name: Integrate KernelSU
@@ -39,31 +34,38 @@ jobs:
         rm -rf drivers/kernelsu
         git clone https://github.com/tiann/KernelSU ksu_tmp
         mv ksu_tmp/kernel drivers/kernelsu
-        # Clean injection into Kconfig/Makefile
         sed -i '1i source "drivers/kernelsu/Kconfig"' drivers/Kconfig
         sed -i '1i obj-y += kernelsu/' drivers/Makefile
         rm -rf ksu_tmp
 
-    - name: Configure and Build
+    - name: Build Kernel
       run: |
         cd kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        export KCFLAGS="-w" # Totally ignore all warnings
-        
+        export KCFLAGS="-w"
         mkdir -p out
-        # Using the actual Exynos 850 config for A135F
-        make O=out ARCH=arm64 exynos850_defconfig
+
+        # AUTO-DETECT DEFCONFIG: This finds the right file even if the name changes
+        # We look for 'a13', '3830', or 'exynos850' in the configs folder
+        CONF_NAME=$(ls arch/arm64/configs/ | grep -E 'a13|3830|exynos850' | head -n 1)
+        echo "Found Config: $CONF_NAME"
         
-        # Enable KSU & Disable Signature Checks
-        scripts/config --file out/.config --enable KSU
-        scripts/config --file out/.config --disable MODULE_SIG
-        scripts/config --file out/.config --disable MODULE_SIG_ALL
+        # Step 1: Generate .config
+        make O=out ARCH=arm64 $CONF_NAME
         
+        # Step 2: Force KSU and Disable Signature checks
+        # Using 'echo' is safer than scripts/config when doing bulk changes
+        echo "CONFIG_KSU=y" >> out/.config
+        echo "CONFIG_MODULES=y" >> out/.config
+        echo "CONFIG_MODULE_SIG=n" >> out/.config
+        echo "CONFIG_MODULE_SIG_ALL=n" >> out/.config
+        
+        # Step 3: Finalize and Compile
         make O=out ARCH=arm64 olddefconfig
         make O=out ARCH=arm64 -j$(nproc)
 
-    - name: Upload Kernel Image
+    - name: Upload Kernel
       uses: actions/upload-artifact@v4
       with:
         name: Atlas-A135F-Fixed
