@@ -1,4 +1,4 @@
-name: Build Kernel - Complete Fixes v13
+name: Build Kernel - Complete Fixes v14
 on:
   workflow_dispatch:
 jobs:
@@ -261,12 +261,16 @@ jobs:
           echo '#ifndef exynos_tmu_add_notifier\nint exynos_tmu_add_notifier(struct notifier_block *n) { return 0; }\n#endif' >> drivers/thermal/cpu_cooling.c 2>/dev/null || true
         fi
 
+        # NEW FIX: Clock dummy conflict - rename conflicting function
+        echo "Fixing gpex_clock_dummy.c conflict..."
+        sed -i 's/__clk_is_enabled/dummy_clk_is_enabled/g' drivers/gpu/arm/bv_r38p1/../exynos/frontend/dummy/gpex_clock_dummy.c 2>/dev/null || true
+
         echo "✅ All fixes applied"
     - name: Add KernelSU
       run: |
         cd kernel
         rm -rf drivers/kernelsu
-        git clone https://github.com/tiann/KernelSU ksu_tmp --depth=1
+        git clone https://github.com/samsungexynos850/KernelSU ksu_tmp --depth=1
         mv ksu_tmp/kernel drivers/kernelsu
         echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
         echo 'obj-y += kernelsu/' >> drivers/Makefile
@@ -419,6 +423,12 @@ jobs:
               echo "Applying emergency cpu_cooling fix..."
               sed -i '/^int exynos_tmu_add_notifier/,/^}/s/^/\/\//' drivers/thermal/cpu_cooling.c 2>/dev/null || true
               sed -i '/#include <soc\/samsung\/tmu.h>/d' drivers/thermal/cpu_cooling.c 2>/dev/null || true
+            fi
+            
+            # NEW: Emergency fix for clock dummy conflict
+            if grep -q "__clk_is_enabled" build_single.log 2>/dev/null || grep -q "gpex_clock_dummy" build_single.log 2>/dev/null; then
+              echo "Applying emergency clock dummy fix..."
+              sed -i 's/__clk_is_enabled/dummy_clk_is_enabled/g' drivers/gpu/arm/bv_r38p1/../exynos/frontend/dummy/gpex_clock_dummy.c 2>/dev/null || true
             fi
             
             # Try one more build attempt
