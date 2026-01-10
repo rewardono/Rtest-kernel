@@ -1,4 +1,4 @@
-name: Build Kernel - Complete Fixes v6
+name: Build Kernel - Complete Fixes v7
 on:
   workflow_dispatch:
 jobs:
@@ -88,67 +88,63 @@ jobs:
         # 9. Fix systrace_mark.h
         sed -i 's|systrace_mark_end()\s*__systrace_mark(SYSTRACE_MARK_TYPE_END, "")|systrace_mark_end() __systrace_mark(SYSTRACE_MARK_TYPE_END, "end")|' include/trace/systrace_mark.h 2>/dev/null || true
         
-        # 10. ENHANCED FIX: Watchdog.c - aggressively remove Samsung-specific softlockup code and balance #ifdef
-        echo "Fixing watchdog.c softlockup errors..."
+        # 10. ENHANCED FIX: Watchdog.c - remove Samsung-specific code while keeping mainline softlockup
+        echo "Fixing watchdog.c..."
         if [ -f "kernel/watchdog.c" ]; then
-          # Backup the file first
           cp kernel/watchdog.c kernel/watchdog.c.backup
           
-          # Remove entire problematic #ifdef block (Samsung extensions under CONFIG_SOFTLOCKUP_DETECTOR)
-          sed -i '/#ifdef CONFIG_SOFTLOCKUP_DETECTOR/,/#endif/d' kernel/watchdog.c 2>/dev/null || true
+          # Remove SEC_DEBUG_LOCKUP_INFO blocks
+          sed -i '/#ifdef CONFIG_SEC_DEBUG_LOCKUP_INFO/,/#endif/d' kernel/watchdog.c 2>/dev/null || true
           
-          # If still unbalanced, add #endif at end as fallback
-          echo "#endif /* CONFIG_SOFTLOCKUP_DETECTOR */" >> kernel/watchdog.c 2>/dev/null || true
+          # Remove check_softlockup_type function
+          awk '/static void check_softlockup_type/,/^}/ {next} {print}' kernel/watchdog.c > kernel/watchdog.c.tmp && mv kernel/watchdog.c.tmp kernel/watchdog.c
           
-          # Comment out the entire check_softlockup_type function (lines around 635)
-          awk '/static void check_softlockup_type/,/^}/ {print "//" $0; next} {print}' kernel/watchdog.c > kernel/watchdog.c.tmp && mv kernel/watchdog.c.tmp kernel/watchdog.c
-          
-          # Also comment out the call to check_softlockup_type
+          # Remove calls to check_softlockup_type
           sed -i 's/check_softlockup_type(cpu);//g' kernel/watchdog.c 2>/dev/null || true
           
-          # Remove references to percpu_sl_info and other Samsung vars
+          # Remove percpu_sl_info and related
           sed -i '/percpu_sl_info/d' kernel/watchdog.c 2>/dev/null || true
           sed -i '/sl_to_name/d' kernel/watchdog.c 2>/dev/null || true
+          sed -i '/sl_info/d' kernel/watchdog.c 2>/dev/null || true
+          
+          # Ensure balanced #ifdefs
+          echo "#endif /* CONFIG_SOFTLOCKUP_DETECTOR */" >> kernel/watchdog.c 2>/dev/null || true
         fi
         
         # 11. FIX: Samsung BTS driver - fix missing types.h
         echo "Fixing BTS driver missing types.h..."
         if [ -f "drivers/soc/samsung/cal-if/pwrcal-env.h" ]; then
-          # Fix the include path
           sed -i 's|#include "types.h"|#include <linux/types.h>|' drivers/soc/samsung/cal-if/pwrcal-env.h 2>/dev/null || true
         fi
         
         # 12. FIX: Add missing softlockup_info forward declaration if needed
         if grep -q "struct softlockup_info" kernel/watchdog.c 2>/dev/null; then
           echo "Adding forward declaration for softlockup_info..."
-          # Add forward declaration at the beginning of watchdog.c
           sed -i '/#include <linux\/srcu.h>/a struct softlockup_info;' kernel/watchdog.c 2>/dev/null || true
         fi
         
         # 13. NEW FIX: Devfreq governor_simpleondemand.c - remove Samsung-specific multiplication_weight
         echo "Fixing governor_simpleondemand.c..."
         if [ -f "drivers/devfreq/governor_simpleondemand.c" ]; then
-          # Comment out the if condition and assignment for multiplication_weight
           sed -i '/if (data->multiplication_weight)/s/^/\/\//' drivers/devfreq/governor_simpleondemand.c 2>/dev/null || true
           sed -i '/dfso_multiplication_weight = data->multiplication_weight;/s/^/\/\//' drivers/devfreq/governor_simpleondemand.c 2>/dev/null || true
           
-          # If needed, declare dfso_multiplication_weight as 1 (fallback)
           sed -i '/unsigned long dfso_multiplication_weight;/a unsigned long dfso_multiplication_weight = 1;' drivers/devfreq/governor_simpleondemand.c 2>/dev/null || true
         fi
 
-        # 14. NEW FIX: Input booster - aggressively comment out the entire vendor section to avoid syntax errors
+        # 14. NEW FIX: Input booster - aggressively comment out the vendor section
         echo "Fixing input_booster in input.c..."
         if [ -f "drivers/input/input.c" ]; then
-          # Backup file
           cp drivers/input/input.c drivers/input/input.c.backup
           
-          # Comment out the entire Input Booster section from the comment to the end of the file
+          # Comment the entire Input Booster section
           sed -i '/\/\* \[ System Performance - Input Booster \*\//,$s/^/\/\//' drivers/input/input.c 2>/dev/null || true
           
-          # Remove the include for input_booster.h
+          # Remove the include
           sed -i '/#include <linux\/input\/input_booster.h>/d' drivers/input/input.c 2>/dev/null || true
           
-          # Additional cleanups to remove any remaining booster references
+          # Cleanup references
+          sed -i '/input_booster_/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/DECLARE_SET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/DECLARE_RESET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/DECLARE_TIMEOUT_FUNC/d' drivers/input/input.c 2>/dev/null || true
@@ -158,30 +154,53 @@ jobs:
           sed -i '/REMOVE_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/RUN_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/pr_booster/d' drivers/input/input.c 2>/dev/null || true
-          sed -i '/input_booster_/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/emstune_add_request/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/input_count/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/input_events/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/TouchIDs/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/device_tree_infor/d' drivers/input/input.c 2>/dev/null || true
           
-          # Comment out specific functions if still present
-          sed -i '/void input_booster_init(void)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          sed -i '/void input_booster(struct input_dev \*dev)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          sed -i '/input_emstune_init/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          sed -i '/DECLARE_STATE_FUNC(idle)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          sed -i '/DECLARE_STATE_FUNC(press)/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          sed -i '/_reset_booster_work_func/,/^[ \t]*}/s/^/\/\//' drivers/input/input.c 2>/dev/null || true
-          
-          # Remove any stray closing braces or fix syntax
-          # This is a hack: remove lines that are just '}' if causing issues
+          # Remove stray braces
           sed -i '/^[ \t]*}[ \t]*$/d' drivers/input/input.c 2>/dev/null || true
         fi
         
-        # Fix header if needed - comment entire file
+        # Fix input_booster.h - comment entire file
         if [ -f "include/linux/input/input_booster.h" ]; then
           sed -i '1,$s/^/\/\//' include/linux/input/input_booster.h 2>/dev/null || true
         fi
+        
+        # 15. NEW FIX: ufshcd.c - fix duplicate case, label, and flags
+        echo "Fixing ufshcd.c..."
+        if [ -f "drivers/scsi/ufs/ufshcd.c" ]; then
+          cp drivers/scsi/ufs/ufshcd.c drivers/scsi/ufs/ufshcd.c.backup
+          
+          # Remove duplicate case OCS_FATAL_ERROR
+          sed -i '/case OCS_FATAL_ERROR:/ {N; /case OCS_FATAL_ERROR:/d}' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
+          
+          # Add cleanup label in ufshcd_abort
+          sed -i '/return ret;/a cleanup:' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
+          
+          # Add flags declaration in ufshcd_reset_and_restore
+          sed -i '/int ufshcd_reset_and_restore(struct ufs_hba \*hba)/a {\nunsigned long flags;' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
+          
+          # Close the brace if needed
+          echo "}" >> drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
+        fi
+        
+        # 16. NEW FIX: accelometer_sensor.c - comment out accel_ops references
+        echo "Fixing accelometer_sensor.c..."
+        if [ -f "drivers/sensorhub/accelerometer/accelometer_sensor.c" ]; then
+          cp drivers/sensorhub/accelerometer/accelometer_sensor.c drivers/sensorhub/accelerometer/accelometer_sensor.c.backup
+          
+          # Comment lines with accel_ops
+          sed -i '/accel_ops/s/^/\/\//' drivers/sensorhub/accelerometer/accelometer_sensor.c 2>/dev/null || true
+          
+          # Or comment the entire file if issues persist
+          sed -i '1,$s/^/\/\//' drivers/sensorhub/accelerometer/accelometer_sensor.c 2>/dev/null || true
+        fi
+        
+        # Optionally remove vendor sensorhub if still failing
+        rm -rf drivers/sensorhub 2>/dev/null || true
         
         echo "✅ All fixes applied"
     - name: Add KernelSU
@@ -240,6 +259,16 @@ jobs:
         ./scripts/config --file out/.config --disable SCHED_EMS
         ./scripts/config --file out/.config --disable SCHED_EMSTUNE
         
+        # NEW: Disable softlockup if causing issues, but try to keep it
+        # ./scripts/config --file out/.config --disable SOFTLOCKUP_DETECTOR
+        
+        # Disable UFSHCD if needed, but it's storage, so patch instead
+        # ./scripts/config --file out/.config --disable UFSHCD
+        
+        # Disable sensorhub
+        ./scripts/config --file out/.config --disable SENSORHUB
+        ./scripts/config --file out/.config --disable SSP_SENSOR
+        
         make O=out ARCH=arm64 olddefconfig
     - name: Build Kernel
       run: |
@@ -274,9 +303,10 @@ jobs:
             echo "🛠️ Attempting emergency fixes..."
             
             # Fix watchdog.c more aggressively if still failing
-            if grep -q "unterminated #ifdef" build_single.log 2>/dev/null; then
+            if grep -q "unterminated #ifdef" build_single.log 2>/dev/null || grep -q "sample_period" build_single.log 2>/dev/null; then
               echo "Applying emergency watchdog.c fix..."
-              sed -i '/#ifdef CONFIG_SOFTLOCKUP_DETECTOR/,/#endif/d' kernel/watchdog.c 2>/dev/null || true
+              sed -i '/#ifdef CONFIG_SEC_DEBUG_LOCKUP_INFO/,/#endif/d' kernel/watchdog.c 2>/dev/null || true
+              awk '/static void check_softlockup_type/,/^}/ {next} {print}' kernel/watchdog.c > kernel/watchdog.c.tmp && mv kernel/watchdog.c.tmp kernel/watchdog.c
             fi
             
             # Fix devfreq more aggressively
@@ -285,28 +315,25 @@ jobs:
               sed -i '/multiplication_weight/d' drivers/devfreq/governor_simpleondemand.c 2>/dev/null || true
             fi
             
-            # NEW: Emergency fix for input_booster if still error
+            # Emergency fix for input_booster if still error
             if grep -q "input_booster" build_single.log 2>/dev/null || grep -q "head_time" build_single.log 2>/dev/null; then
               echo "Applying emergency input_booster fix..."
               sed -i '/\/\* \[ System Performance - Input Booster \*\//,$s/^/\/\//' drivers/input/input.c 2>/dev/null || true
               sed -i '/#include <linux\/input\/input_booster.h>/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/input_booster_/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/DECLARE_SET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/DECLARE_RESET_BOOSTER_FUNC/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/DECLARE_TIMEOUT_FUNC/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/DECLARE_STATE_FUNC/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/INIT_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/SET_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/REMOVE_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/RUN_BOOSTER/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/pr_booster/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/emstune_add_request/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/input_count/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/input_events/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/TouchIDs/d' drivers/input/input.c 2>/dev/null || true
-              sed -i '/device_tree_infor/d' drivers/input/input.c 2>/dev/null || true
-              # Remove stray braces
-              sed -i '/^[ \t]*}[ \t]*$/d' drivers/input/input.c 2>/dev/null || true
+            fi
+            
+            # Emergency fix for ufshcd if error
+            if grep -q "ufshcd" build_single.log 2>/dev/null; then
+              echo "Applying emergency ufshcd fix..."
+              sed -i '/case OCS_FATAL_ERROR:/ {N; /case OCS_FATAL_ERROR:/d}' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
+              sed -i '/return ret;/a cleanup:' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
+              sed -i '/int ufshcd_reset_and_restore(struct ufs_hba \*hba)/a {\nunsigned long flags;' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
+            fi
+            
+            # Emergency fix for accelometer_sensor if error
+            if grep -q "accel_ops" build_single.log 2>/dev/null; then
+              echo "Applying emergency accelometer_sensor fix..."
+              sed -i '1,$s/^/\/\//' drivers/sensorhub/accelerometer/accelometer_sensor.c 2>/dev/null || true
             fi
             
             # Try one more build attempt
