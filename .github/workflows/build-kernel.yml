@@ -1,4 +1,4 @@
-name: Build Kernel - Complete Fixes v7
+name: Build Kernel - Complete Fixes v8
 on:
   workflow_dispatch:
 jobs:
@@ -20,6 +20,10 @@ jobs:
         cd kernel
         
         echo "=== Applying all necessary fixes ==="
+        
+        # NEW: Comment out missing sensorhub Kconfig source to fix defconfig error
+        echo "Fixing drivers/Kconfig for missing sensorhub..."
+        sed -i '/source "drivers\/sensorhub\/Kconfig"/s/^/#/' drivers/Kconfig 2>/dev/null || true
         
         # 1. Fix bpf_trace.c - remove 'inline' from variable argument function
         echo "Fixing bpf_trace.c..."
@@ -200,7 +204,7 @@ jobs:
         fi
         
         # Optionally remove vendor sensorhub if still failing
-        rm -rf drivers/sensorhub 2>/dev/null || true
+        # rm -rf drivers/sensorhub 2>/dev/null || true
         
         echo "✅ All fixes applied"
     - name: Add KernelSU
