@@ -1,4 +1,4 @@
-name: Build Kernel - Complete Fixes v12
+name: Build Kernel - Complete Fixes v13
 on:
   workflow_dispatch:
 jobs:
@@ -248,6 +248,19 @@ jobs:
           sed -i '/return dev->_tx\[queue_id\].umem;/a return NULL;' net/xdp/xdp_umem.c 2>/dev/null || true
         fi
 
+        # NEW FIX: thermal/cpu_cooling.c - fix redefinition of exynos_tmu_add_notifier
+        echo "Fixing cpu_cooling.c..."
+        if [ -f "drivers/thermal/cpu_cooling.c" ]; then
+          # Comment out the redefinition
+          sed -i '/^int exynos_tmu_add_notifier/,/^}/s/^/\/\//' drivers/thermal/cpu_cooling.c 2>/dev/null || true
+          
+          # Or remove the include if causing conflict
+          sed -i '/#include <soc\/samsung\/tmu.h>/d' drivers/thermal/cpu_cooling.c 2>/dev/null || true
+          
+          # Add dummy if needed
+          echo '#ifndef exynos_tmu_add_notifier\nint exynos_tmu_add_notifier(struct notifier_block *n) { return 0; }\n#endif' >> drivers/thermal/cpu_cooling.c 2>/dev/null || true
+        fi
+
         echo "✅ All fixes applied"
     - name: Add KernelSU
       run: |
@@ -322,6 +335,10 @@ jobs:
         # NEW FIX: Disable XDP sockets to avoid xdp_umem.c errors
         ./scripts/config --file out/.config --disable XDP_SOCKETS
         
+        # NEW FIX: Disable CPU thermal to avoid cpu_cooling.c errors
+        ./scripts/config --file out/.config --disable CPU_THERMAL
+        ./scripts/config --file out/.config --disable EXYNOS_THERMAL
+        
         make O=out ARCH=arm64 olddefconfig
     - name: Build Kernel
       run: |
@@ -395,6 +412,13 @@ jobs:
               sed -i '/umem =/s/^/\/\//' net/xdp/xdp_umem.c 2>/dev/null || true
               sed -i '/return .*umem;/s/^/\/\//; /return .*umem;/a return NULL;' net/xdp/xdp_umem.c 2>/dev/null || true
               sed -i '/umem = NULL;/s/^/\/\//' net/xdp/xdp_umem.c 2>/dev/null || true
+            fi
+            
+            # NEW: Emergency fix for cpu_cooling if error
+            if grep -q "cpu_cooling" build_single.log 2>/dev/null || grep -q "exynos_tmu_add_notifier" build_single.log 2>/dev/null; then
+              echo "Applying emergency cpu_cooling fix..."
+              sed -i '/^int exynos_tmu_add_notifier/,/^}/s/^/\/\//' drivers/thermal/cpu_cooling.c 2>/dev/null || true
+              sed -i '/#include <soc\/samsung\/tmu.h>/d' drivers/thermal/cpu_cooling.c 2>/dev/null || true
             fi
             
             # Try one more build attempt
