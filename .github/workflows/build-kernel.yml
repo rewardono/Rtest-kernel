@@ -1,48 +1,50 @@
-name: Build Kernel - Complete Fixes v19
+name: Build Kernel - Complete Fixes v20
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # This enables the manual "Run workflow" button in GitHub Actions
+  push:               # Optional: also runs on push (useful for testing)
+    branches:
+      - main
 jobs:
   build:
     runs-on: ubuntu-22.04
     timeout-minutes: 180
     steps:
+    - name: Checkout Repository (ensures workflow file is present)
+      uses: actions/checkout@v4
+
     - name: Setup Environment
       run: |
         sudo apt update
         sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3 ccache
         sudo ln -s /usr/bin/ccache /usr/local/bin/ccache || true
+
     - name: Get Kernel Source
       run: |
         rm -rf kernel
         git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+
     - name: Apply Comprehensive Fixes
       run: |
         cd kernel
         
         echo "=== Applying all necessary fixes ==="
         
-        # Remove sensorhub (prevents many sensor-related issues)
+        # Remove sensorhub
         rm -rf drivers/sensorhub 2>/dev/null || true
         sed -i '/sensorhub/d' drivers/Kconfig 2>/dev/null || true
         sed -i '/sensorhub/d' drivers/Makefile 2>/dev/null || true
         
-        # --- Critical fixes for the current errors ---
-        
-        # 1. Fix secdbg_exin_get_unfz macro in sec_debug.h (used in panic as string)
+        # Critical fix 1: secdbg_exin_get_unfz - make it return empty string for panic()
         echo "Fixing secdbg_exin_get_unfz macro..."
         if grep -q "secdbg_exin_get_unfz" include/linux/sec_debug.h; then
           sed -i 's|#define secdbg_exin_get_unfz.*|#define secdbg_exin_get_unfz(a) ""|' include/linux/sec_debug.h
-        else
-          echo '#define secdbg_exin_get_unfz(a) ""' >> include/linux/sec_debug.h
         fi
         
-        # 2. Fix need_memory_boosting inline stub (provides body for inlining)
-        echo "Fixing need_memory_boosting stub..."
-        # Remove any existing conflicting declaration/definition
+        # Critical fix 2: need_memory_boosting - provide proper inline stub
+        echo "Fixing need_memory_boosting inline stub..."
         sed -i '/need_memory_boosting/d' include/linux/mm.h 2>/dev/null || true
         sed -i '/need_memory_boosting/d' mm/vmscan.c 2>/dev/null || true
         
-        # Add proper static inline stub at the end of mm.h
         cat << 'EOF' >> include/linux/mm.h
 
 #ifndef need_memory_boosting
@@ -50,12 +52,10 @@ static inline bool need_memory_boosting(void) { return false; }
 #endif
 EOF
         
-        # --- Previous proven fixes (restored and strengthened) ---
-        
-        # bpf_trace.c inline issue
+        # bpf_trace inline issue
         sed -i 's/static inline __printf(1, 0)/static __noinline __printf(1, 0)/' kernel/trace/bpf_trace.c 2>/dev/null || true
         
-        # EMS header conflicts
+        # EMS conflicts (signature mismatch)
         if [ -f "include/linux/ems.h" ]; then
           sed -i 's/lb_cfs_tasks(struct rq \*rq, struct sched_entity \*se)/lb_cfs_tasks(struct rq *rq, int sse)/' include/linux/ems.h 2>/dev/null || true
         fi
@@ -63,7 +63,7 @@ EOF
           sed -i 's/struct list_head \*lb_cfs_tasks(struct rq \*rq, struct sched_entity \*se)/struct list_head *lb_cfs_tasks(struct rq *rq, int sse)/' kernel/sched/ems/load_balance.c 2>/dev/null || true
         fi
         
-        # GPU clock dummy conflict (multiple possible paths + disable export)
+        # GPU clock dummy (prevent multiple definition)
         echo "Fixing GPU clock dummy conflicts..."
         for DUMMY_FILE in \
           "drivers/gpu/arm/bv_r38p1/exynos/frontend/dummy/gpex_clock_dummy.c" \
@@ -78,10 +78,11 @@ EOF
           fi
         done
         
-        # Suppress -Werror
+        # Turn off -Werror everywhere
         find . -type f -name "Makefile*" -exec sed -i 's/-Werror=/-Wno-error=/g; s/-Werror\b//g' {} \; 2>/dev/null || true
         
         echo "✅ All fixes applied"
+
     - name: Add KernelSU
       run: |
         cd kernel
@@ -91,6 +92,7 @@ EOF
         echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
         echo 'obj-y += kernelsu/' >> drivers/Makefile
         rm -rf ksu_tmp
+
     - name: Configure Kernel
       run: |
         cd kernel
@@ -109,7 +111,7 @@ EOF
         ./scripts/config --file out/.config --disable MODULE_SIG_ALL
         ./scripts/config --file out/.config --disable MODULE_SIG_FORCE
         
-        # Disable proprietary Mali/GPU drivers completely
+        # Disable all proprietary/Samsung stuff that causes issues
         ./scripts/config --file out/.config --disable MALI_MIDGARD
         ./scripts/config --file out/.config --disable MALI_BIFROST
         ./scripts/config --file out/.config --disable MALI_VALHALL
@@ -122,7 +124,6 @@ EOF
         ./scripts/config --file out/.config --disable GPEX_CLOCK
         ./scripts/config --file out/.config --disable DRM_SAMSUNG_DPU
         
-        # Disable other known problematic Samsung features
         ./scripts/config --file out/.config --disable SEC_DEBUG
         ./scripts/config --file out/.config --disable SEC_DEBUG_EXTRA_INFO
         ./scripts/config --file out/.config --disable EXYNOS_BTS
@@ -137,6 +138,7 @@ EOF
         ./scripts/config --file out/.config --disable EXYNOS_THERMAL
         
         make O=out ARCH=arm64 olddefconfig
+
     - name: Build Kernel
       run: |
         cd kernel
@@ -149,12 +151,12 @@ EOF
         if make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log; then
           echo "✅ Parallel build successful!"
         else
-          echo "⚠️ Parallel build failed, falling back to single-core..."
+          echo "⚠️ Parallel build failed, trying single-core..."
           make O=out ARCH=arm64 clean
           if make O=out ARCH=arm64 -j1 2>&1 | tee build_single.log; then
             echo "✅ Single-core build successful!"
           else
-            echo "❌ Both builds failed"
+            echo "❌ Build failed completely"
             exit 1
           fi
         fi
@@ -163,10 +165,11 @@ EOF
           echo "🎉🎉🎉 KERNEL BUILD SUCCESSFUL! 🎉🎉🎉"
           ls -lh out/arch/arm64/boot/Image
         else
-          echo "❌ Kernel Image not found!"
+          echo "❌ No Image found!"
           find out -name "Image*" | head -10
           exit 1
         fi
+
     - name: Create AnyKernel3 Package
       if: success()
       run: |
@@ -180,7 +183,6 @@ EOF
         
         cat > anykernel/anykernel.sh << 'EOF'
         #!/system/bin/sh
-        # AnyKernel3 Script
         properties() {
         kernel.string=Atlas-GKI-KernelSU
         do.devicecheck=1
@@ -203,6 +205,7 @@ EOF
         chmod +x anykernel/anykernel.sh
         cd anykernel
         zip -r9 ../Atlas-GKI-KernelSU-$(date +%Y%m%d).zip .
+
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
@@ -210,6 +213,7 @@ EOF
         path: |
           kernel/out/arch/arm64/boot/Image
           kernel/Atlas-GKI-KernelSU-*.zip
+
     - name: Upload Build Logs
       if: always()
       uses: actions/upload-artifact@v4
