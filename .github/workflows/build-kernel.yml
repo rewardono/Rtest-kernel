@@ -1,4 +1,4 @@
-name: Build Kernel - Complete Fixes v8
+name: Build Kernel - Complete Fixes v9
 on:
   workflow_dispatch:
 jobs:
@@ -21,9 +21,13 @@ jobs:
         
         echo "=== Applying all necessary fixes ==="
         
-        # NEW: Comment out missing sensorhub Kconfig source to fix defconfig error
-        echo "Fixing drivers/Kconfig for missing sensorhub..."
-        sed -i '/source "drivers\/sensorhub\/Kconfig"/s/^/#/' drivers/Kconfig 2>/dev/null || true
+        # NEW: Remove sensorhub directory to avoid all sensor-related errors
+        echo "Removing sensorhub directory..."
+        rm -rf drivers/sensorhub 2>/dev/null || true
+        
+        # Remove or comment sensorhub include in Kconfig and Makefile
+        sed -i '/sensorhub/d' drivers/Kconfig 2>/dev/null || true
+        sed -i '/sensorhub/d' drivers/Makefile 2>/dev/null || true
         
         # 1. Fix bpf_trace.c - remove 'inline' from variable argument function
         echo "Fixing bpf_trace.c..."
@@ -111,6 +115,11 @@ jobs:
           sed -i '/sl_to_name/d' kernel/watchdog.c 2>/dev/null || true
           sed -i '/sl_info/d' kernel/watchdog.c 2>/dev/null || true
           
+          # Remove unbalanced #endif or #else
+          sed -i '/#else \/* CONFIG_SOFTLOCKUP_DETECTOR \*/d' kernel/watchdog.c 2>/dev/null || true
+          sed -i '/#endif \/* !CONFIG_SOFTLOCKUP_DETECTOR \*/d' kernel/watchdog.c 2>/dev/null || true
+          sed -i '/#endif \/* CONFIG_SOFTLOCKUP_DETECTOR \*/$/d' kernel/watchdog.c 2>/dev/null || true
+          
           # Ensure balanced #ifdefs
           echo "#endif /* CONFIG_SOFTLOCKUP_DETECTOR */" >> kernel/watchdog.c 2>/dev/null || true
         fi
@@ -164,8 +173,9 @@ jobs:
           sed -i '/TouchIDs/d' drivers/input/input.c 2>/dev/null || true
           sed -i '/device_tree_infor/d' drivers/input/input.c 2>/dev/null || true
           
-          # Remove stray braces
-          sed -i '/^[ \t]*}[ \t]*$/d' drivers/input/input.c 2>/dev/null || true
+          # Remove stray braces more aggressively
+          sed -i '/^ *}/d' drivers/input/input.c 2>/dev/null || true
+          sed -i '/^ *{/d' drivers/input/input.c 2>/dev/null || true  # Remove stray opening if any
         fi
         
         # Fix input_booster.h - comment entire file
@@ -178,17 +188,15 @@ jobs:
         if [ -f "drivers/scsi/ufs/ufshcd.c" ]; then
           cp drivers/scsi/ufs/ufshcd.c drivers/scsi/ufs/ufshcd.c.backup
           
-          # Remove duplicate case OCS_FATAL_ERROR
-          sed -i '/case OCS_FATAL_ERROR:/ {N; /case OCS_FATAL_ERROR:/d}' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
+          # Remove duplicate case OCS_FATAL_ERROR (remove the second one)
+          sed -i '5371,5372d' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
           
-          # Add cleanup label in ufshcd_abort
-          sed -i '/return ret;/a cleanup:' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
+          # Add cleanup label in ufshcd_abort before return
+          sed -i '/return ret;/i cleanup:' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
           
-          # Add flags declaration in ufshcd_reset_and_restore
-          sed -i '/int ufshcd_reset_and_restore(struct ufs_hba \*hba)/a {\nunsigned long flags;' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
+          # Add flags declaration inside ufshcd_reset_and_restore function
+          sed -i '/int ufshcd_reset_and_restore(struct ufs_hba \*hba)/ {n; i unsigned long flags;' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
           
-          # Close the brace if needed
-          echo "}" >> drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
         fi
         
         # 16. NEW FIX: accelometer_sensor.c - comment out accel_ops references
@@ -202,9 +210,6 @@ jobs:
           # Or comment the entire file if issues persist
           sed -i '1,$s/^/\/\//' drivers/sensorhub/accelerometer/accelometer_sensor.c 2>/dev/null || true
         fi
-        
-        # Optionally remove vendor sensorhub if still failing
-        # rm -rf drivers/sensorhub 2>/dev/null || true
         
         echo "✅ All fixes applied"
     - name: Add KernelSU
@@ -254,6 +259,9 @@ jobs:
         ./scripts/config --file out/.config --disable SEC_DEBUG_SOFTLOCKUP_DETECTOR
         ./scripts/config --file out/.config --disable SEC_DEBUG_WATCHDOG
         
+        # Disable softlockup detector to avoid watchdog.c errors
+        ./scripts/config --file out/.config --disable SOFTLOCKUP_DETECTOR
+        
         # NEW FIX: Disable input booster and EMS to avoid vendor-specific errors
         ./scripts/config --file out/.config --disable INPUT_BOOSTER
         ./scripts/config --file out/.config --disable SEC_INPUT_BOOSTER  # Alternative name if exists
@@ -262,9 +270,6 @@ jobs:
         ./scripts/config --file out/.config --disable EMS_TUNE
         ./scripts/config --file out/.config --disable SCHED_EMS
         ./scripts/config --file out/.config --disable SCHED_EMSTUNE
-        
-        # NEW: Disable softlockup if causing issues, but try to keep it
-        # ./scripts/config --file out/.config --disable SOFTLOCKUP_DETECTOR
         
         # Disable UFSHCD if needed, but it's storage, so patch instead
         # ./scripts/config --file out/.config --disable UFSHCD
@@ -331,7 +336,7 @@ jobs:
               echo "Applying emergency ufshcd fix..."
               sed -i '/case OCS_FATAL_ERROR:/ {N; /case OCS_FATAL_ERROR:/d}' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
               sed -i '/return ret;/a cleanup:' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
-              sed -i '/int ufshcd_reset_and_restore(struct ufs_hba \*hba)/a {\nunsigned long flags;' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
+              sed -i '/int ufshcd_reset_and_restore(struct ufs_hba \*hba)/ {n; i unsigned long flags;' drivers/scsi/ufs/ufshcd.c 2>/dev/null || true
             fi
             
             # Emergency fix for accelometer_sensor if error
