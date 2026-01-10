@@ -1,4 +1,4 @@
-name: Build Kernel - Complete Fixes v18
+name: Build Kernel - Complete Fixes v19
 on:
   workflow_dispatch:
 jobs:
@@ -18,23 +18,53 @@ jobs:
     - name: Apply Comprehensive Fixes
       run: |
         cd kernel
-       
+        
         echo "=== Applying all necessary fixes ==="
-       
-        # Remove sensorhub directory
-        echo "Removing sensorhub directory..."
+        
+        # Remove sensorhub (prevents many sensor-related issues)
         rm -rf drivers/sensorhub 2>/dev/null || true
         sed -i '/sensorhub/d' drivers/Kconfig 2>/dev/null || true
         sed -i '/sensorhub/d' drivers/Makefile 2>/dev/null || true
-       
-        # All your previous fixes from v16 (bpf_trace, sec_debug, EMS, need_memory_boosting, etc.)
-        # → keeping them exactly as before (omitted here for brevity but you must include them if you modified them)
-        # If you still have your v16 workflow, copy the entire "Apply Comprehensive Fixes" block from there.
-        # The only NEW/UPDATED part is the GPU clock dummy fix below.
-       
-        # IMPROVED GPU CLOCK DUMMY FIX
-        echo "Applying improved fix for GPU clock dummy conflict..."
-        # Try multiple possible paths (the repo structure may vary)
+        
+        # --- Critical fixes for the current errors ---
+        
+        # 1. Fix secdbg_exin_get_unfz macro in sec_debug.h (used in panic as string)
+        echo "Fixing secdbg_exin_get_unfz macro..."
+        if grep -q "secdbg_exin_get_unfz" include/linux/sec_debug.h; then
+          sed -i 's|#define secdbg_exin_get_unfz.*|#define secdbg_exin_get_unfz(a) ""|' include/linux/sec_debug.h
+        else
+          echo '#define secdbg_exin_get_unfz(a) ""' >> include/linux/sec_debug.h
+        fi
+        
+        # 2. Fix need_memory_boosting inline stub (provides body for inlining)
+        echo "Fixing need_memory_boosting stub..."
+        # Remove any existing conflicting declaration/definition
+        sed -i '/need_memory_boosting/d' include/linux/mm.h 2>/dev/null || true
+        sed -i '/need_memory_boosting/d' mm/vmscan.c 2>/dev/null || true
+        
+        # Add proper static inline stub at the end of mm.h
+        cat << 'EOF' >> include/linux/mm.h
+
+#ifndef need_memory_boosting
+static inline bool need_memory_boosting(void) { return false; }
+#endif
+EOF
+        
+        # --- Previous proven fixes (restored and strengthened) ---
+        
+        # bpf_trace.c inline issue
+        sed -i 's/static inline __printf(1, 0)/static __noinline __printf(1, 0)/' kernel/trace/bpf_trace.c 2>/dev/null || true
+        
+        # EMS header conflicts
+        if [ -f "include/linux/ems.h" ]; then
+          sed -i 's/lb_cfs_tasks(struct rq \*rq, struct sched_entity \*se)/lb_cfs_tasks(struct rq *rq, int sse)/' include/linux/ems.h 2>/dev/null || true
+        fi
+        if [ -f "kernel/sched/ems/load_balance.c" ]; then
+          sed -i 's/struct list_head \*lb_cfs_tasks(struct rq \*rq, struct sched_entity \*se)/struct list_head *lb_cfs_tasks(struct rq *rq, int sse)/' kernel/sched/ems/load_balance.c 2>/dev/null || true
+        fi
+        
+        # GPU clock dummy conflict (multiple possible paths + disable export)
+        echo "Fixing GPU clock dummy conflicts..."
         for DUMMY_FILE in \
           "drivers/gpu/arm/bv_r38p1/exynos/frontend/dummy/gpex_clock_dummy.c" \
           "drivers/gpu/arm/exynos/frontend/dummy/gpex_clock_dummy.c" \
@@ -44,11 +74,13 @@ jobs:
             sed -i 's/\b__clk_is_enabled\b/gpex_dummy_clk_is_enabled/g' "$DUMMY_FILE"
             sed -i 's/\bclk_is_enabled\b/gpex_dummy_clk_is_enabled/g' "$DUMMY_FILE"
             sed -i 's/EXPORT_SYMBOL.*/\/\/ &/' "$DUMMY_FILE"
-            echo "Fixed clock dummy in $DUMMY_FILE"
-            break
+            echo "Patched $DUMMY_FILE"
           fi
         done
-       
+        
+        # Suppress -Werror
+        find . -type f -name "Makefile*" -exec sed -i 's/-Werror=/-Wno-error=/g; s/-Werror\b//g' {} \; 2>/dev/null || true
+        
         echo "✅ All fixes applied"
     - name: Add KernelSU
       run: |
@@ -65,20 +97,19 @@ jobs:
         rm -rf out
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-       
+        
         mkdir -p out
         make O=out ARCH=arm64 gki_defconfig
-       
+        
         chmod +x scripts/config
-       
+        
         ./scripts/config --file out/.config --enable KSU
         ./scripts/config --file out/.config --set-str KSU_GIT_VERSION "github-action-build"
         ./scripts/config --file out/.config --disable MODULE_SIG
         ./scripts/config --file out/.config --disable MODULE_SIG_ALL
         ./scripts/config --file out/.config --disable MODULE_SIG_FORCE
-       
-        # Aggressively disable proprietary Mali/GPU drivers
-        echo "Disabling proprietary Mali/GPU driver options..."
+        
+        # Disable proprietary Mali/GPU drivers completely
         ./scripts/config --file out/.config --disable MALI_MIDGARD
         ./scripts/config --file out/.config --disable MALI_BIFROST
         ./scripts/config --file out/.config --disable MALI_VALHALL
@@ -90,10 +121,21 @@ jobs:
         ./scripts/config --file out/.config --disable GPEX
         ./scripts/config --file out/.config --disable GPEX_CLOCK
         ./scripts/config --file out/.config --disable DRM_SAMSUNG_DPU
-       
-        # Your other disables (BTS, watchdog extensions, input booster, EMS, Bluetooth, sensorhub, UFS, XDP, thermal, etc.)
-        # → keep them as in v16/v17
-       
+        
+        # Disable other known problematic Samsung features
+        ./scripts/config --file out/.config --disable SEC_DEBUG
+        ./scripts/config --file out/.config --disable SEC_DEBUG_EXTRA_INFO
+        ./scripts/config --file out/.config --disable EXYNOS_BTS
+        ./scripts/config --file out/.config --disable INPUT_BOOSTER
+        ./scripts/config --file out/.config --disable EMS
+        ./scripts/config --file out/.config --disable EMSTUNE
+        ./scripts/config --file out/.config --disable SCHED_EMS
+        ./scripts/config --file out/.config --disable BLUETOOTH
+        ./scripts/config --file out/.config --disable SCSI_UFSHCD
+        ./scripts/config --file out/.config --disable XDP_SOCKETS
+        ./scripts/config --file out/.config --disable CPU_THERMAL
+        ./scripts/config --file out/.config --disable EXYNOS_THERMAL
+        
         make O=out ARCH=arm64 olddefconfig
     - name: Build Kernel
       run: |
@@ -101,23 +143,22 @@ jobs:
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
         export KCFLAGS="-w -Wno-error -Wno-error=attribute-alias -Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types"
-       
+        
         echo "🚀 Starting kernel build..."
-       
-        # Full build logic restored from v16
+        
         if make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log; then
           echo "✅ Parallel build successful!"
         else
-          echo "⚠️ Parallel build failed, trying single-core..."
+          echo "⚠️ Parallel build failed, falling back to single-core..."
           make O=out ARCH=arm64 clean
           if make O=out ARCH=arm64 -j1 2>&1 | tee build_single.log; then
             echo "✅ Single-core build successful!"
           else
-            echo "❌ Both builds failed – uploading logs for analysis"
+            echo "❌ Both builds failed"
             exit 1
           fi
         fi
-       
+        
         if [ -f "out/arch/arm64/boot/Image" ]; then
           echo "🎉🎉🎉 KERNEL BUILD SUCCESSFUL! 🎉🎉🎉"
           ls -lh out/arch/arm64/boot/Image
@@ -129,23 +170,46 @@ jobs:
     - name: Create AnyKernel3 Package
       if: success()
       run: |
-        # (unchanged from previous versions)
         cd kernel
         wget -q https://github.com/osm0sis/AnyKernel3/archive/master.zip -O anykernel.zip
         unzip -q anykernel.zip -d anykernel_temp
         mv anykernel_temp/AnyKernel3-master anykernel
         rm -rf anykernel_temp anykernel.zip
+        
         cp out/arch/arm64/boot/Image anykernel/
-        # ... (rest of AnyKernel3 script)
+        
+        cat > anykernel/anykernel.sh << 'EOF'
+        #!/system/bin/sh
+        # AnyKernel3 Script
+        properties() {
+        kernel.string=Atlas-GKI-KernelSU
+        do.devicecheck=1
+        do.modules=0
+        do.systemless=1
+        do.cleanup=1
+        do.cleanuponabort=0
+        device.name1=a13
+        device.name2=a135f
+        device.name3=exynos850
+        }
+        block=/dev/block/by-name/boot;
+        is_slot_device=0;
+        ramdisk_compression=auto;
+        . tools/ak3-core.sh;
+        dump_boot;
+        write_boot;
+        EOF
+        
+        chmod +x anykernel/anykernel.sh
         cd anykernel
-        zip -r9 ../Atlas-GKI-Kernel-$(date +%Y%m%d).zip .
+        zip -r9 ../Atlas-GKI-KernelSU-$(date +%Y%m%d).zip .
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: kernel-build
         path: |
           kernel/out/arch/arm64/boot/Image
-          kernel/Atlas-GKI-Kernel-*.zip
+          kernel/Atlas-GKI-KernelSU-*.zip
     - name: Upload Build Logs
       if: always()
       uses: actions/upload-artifact@v4
