@@ -1,4 +1,4 @@
-name: Build Exynos850 Kernel (Stable Baseline)
+name: Build Atlas Kernel (A135F) with KernelSU
 
 on:
   workflow_dispatch:
@@ -9,25 +9,36 @@ jobs:
     timeout-minutes: 180
 
     steps:
-    - name: Install dependencies
+    - name: Setup build environment
       run: |
         sudo apt update
         sudo apt install -y \
           build-essential bc bison flex libssl-dev libelf-dev \
           gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-          git wget unzip python3 ccache
+          git wget python3 ccache
+        sudo ln -sf /usr/bin/ccache /usr/local/bin/ccache
 
     - name: Clone kernel source
       run: |
-        git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+        git clone --depth=1 https://github.com/samsungexynos850/atlas kernel
 
-    - name: Add KernelSU
+    - name: KernelSU integration (safe)
       run: |
         cd kernel
-        git clone https://github.com/tiann/KernelSU --depth=1 kernelsu
-        ln -s kernelsu/kernel drivers/kernelsu
-        echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
-        echo 'obj-y += kernelsu/' >> drivers/Makefile
+
+        if [ -d drivers/kernelsu ]; then
+          echo "KernelSU already present, skipping clone"
+        else
+          git clone --depth=1 https://github.com/tiann/KernelSU ksu_tmp
+          mv ksu_tmp/kernel drivers/kernelsu
+          rm -rf ksu_tmp
+        fi
+
+        grep -q 'drivers/kernelsu/Kconfig' drivers/Kconfig || \
+          echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
+
+        grep -q 'kernelsu/' drivers/Makefile || \
+          echo 'obj-y += kernelsu/' >> drivers/Makefile
 
     - name: Configure kernel
       run: |
@@ -35,26 +46,50 @@ jobs:
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
 
-        make exynos850-atlas_defconfig
+        mkdir -p out
 
-        scripts/config --enable KSU
-        scripts/config --disable MODULE_SIG
-        scripts/config --disable MODULE_SIG_ALL
-        scripts/config --disable MODULE_SIG_FORCE
+        # IMPORTANT: use vendor defconfig, NOT gki_defconfig
+        make O=out ARCH=arm64 exynos850_defconfig
 
-        scripts/config --enable KALLSYMS
-        scripts/config --enable BPF
-        scripts/config --enable BPF_SYSCALL
-        scripts/config --enable CGROUPS
+        chmod +x scripts/config
 
-        make olddefconfig
+        # KernelSU
+        ./scripts/config --file out/.config --enable KSU
+        ./scripts/config --file out/.config \
+          --set-str KSU_GIT_VERSION "github-actions"
+
+        # GKI-compatibility (fake-GKI)
+        ./scripts/config --file out/.config --enable MODULES
+        ./scripts/config --file out/.config --enable MODVERSIONS
+        ./scripts/config --file out/.config --enable KALLSYMS
+        ./scripts/config --file out/.config --enable KALLSYMS_ALL
+
+        # Reduce Samsung debug breakage
+        ./scripts/config --file out/.config --disable SEC_DEBUG
+        ./scripts/config --file out/.config --disable SEC_DEBUG_EXTRA_INFO
+
+        # Do NOT delete watchdog / ufs / thermal
+        # Only disable known unstable extras
+        ./scripts/config --file out/.config --disable INPUT_BOOSTER
+        ./scripts/config --file out/.config --disable EMS
+        ./scripts/config --file out/.config --disable EMSTUNE
+
+        # No module signing
+        ./scripts/config --file out/.config --disable MODULE_SIG
+        ./scripts/config --file out/.config --disable MODULE_SIG_FORCE
+
+        make O=out ARCH=arm64 olddefconfig
 
     - name: Build kernel
       run: |
         cd kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        make -j$(nproc)
+        export KCFLAGS="-w -Wno-error"
+
+        make O=out ARCH=arm64 -j$(nproc)
+
+        test -f out/arch/arm64/boot/Image
 
     - name: Package AnyKernel3
       run: |
@@ -62,32 +97,41 @@ jobs:
         wget -q https://github.com/osm0sis/AnyKernel3/archive/master.zip
         unzip -q master.zip
         mv AnyKernel3-master anykernel
+        rm master.zip
 
-        cp arch/arm64/boot/Image anykernel/
+        cp out/arch/arm64/boot/Image anykernel/
 
         cat > anykernel/anykernel.sh << 'EOF'
-        #!/system/bin/sh
-        properties() {
-          kernel.string=Exynos850-KernelSU
-          do.devicecheck=1
-          do.systemless=1
-          device.name1=a135f
-        }
-        block=/dev/block/by-name/boot
-        is_slot_device=0
-        . tools/ak3-core.sh
-        dump_boot
-        write_boot
-        EOF
+#!/system/bin/sh
+
+properties() {
+  kernel.string=Atlas-A135F-KernelSU
+  do.devicecheck=1
+  do.modules=0
+  do.systemless=1
+  do.cleanup=1
+  device.name1=a135f
+  device.name2=exynos850
+}
+
+block=/dev/block/by-name/boot
+is_slot_device=0
+
+. tools/ak3-core.sh
+
+dump_boot
+write_boot
+EOF
 
         chmod +x anykernel/anykernel.sh
         cd anykernel
-        zip -r9 ../Exynos850-KernelSU.zip .
+        zip -r9 ../Atlas-A135F-KernelSU.zip .
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: kernel
         path: |
-          kernel/arch/arm64/boot/Image
-          kernel/Exynos850-KernelSU.zip
+          kernel/out/arch/arm64/boot/Image
+          kernel/Atlas-A135F-KernelSU.zip
+          kernel/out/.config
