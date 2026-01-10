@@ -1,4 +1,4 @@
-name: Build Exynos850 GKI-Compatible Kernel v17
+name: Build Exynos850 Kernel (Stable Baseline)
 
 on:
   workflow_dispatch:
@@ -6,84 +6,88 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 120
+    timeout-minutes: 180
 
     steps:
-    - name: Setup Environment
+    - name: Install dependencies
       run: |
         sudo apt update
         sudo apt install -y \
           build-essential bc bison flex libssl-dev libelf-dev \
-          git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-          python3 ccache
+          gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+          git wget unzip python3 ccache
 
-    - name: Clone Kernel Source
+    - name: Clone kernel source
       run: |
-        git clone https://github.com/samsungexynos850/atlas kernel
-        cd kernel
-        git submodule update --init --recursive
-
-    - name: Apply Minimal Required Patches
-      run: |
-        cd kernel
-
-        # bpf_trace fix (known GCC issue)
-        sed -i 's/static inline __printf/static __printf/' \
-          kernel/trace/bpf_trace.c || true
-
-        # sec_debug stub
-        sed -i 's/^#define secdbg_exin_get_unfz.*/#define secdbg_exin_get_unfz(a) ("")/' \
-          include/linux/sec_debug.h || true
+        git clone https://github.com/samsungexynos850/atlas kernel --depth=1
 
     - name: Add KernelSU
       run: |
         cd kernel
-        git clone https://github.com/tiann/KernelSU drivers/kernelsu
+        git clone https://github.com/tiann/KernelSU --depth=1 kernelsu
+        ln -s kernelsu/kernel drivers/kernelsu
         echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
         echo 'obj-y += kernelsu/' >> drivers/Makefile
 
-    - name: Configure Kernel (Vendor Base)
+    - name: Configure kernel
       run: |
         cd kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
 
-        mkdir -p out
-        make O=out exynos850-atlas_defconfig
+        make exynos850-atlas_defconfig
 
-        chmod +x scripts/config
+        scripts/config --enable KSU
+        scripts/config --disable MODULE_SIG
+        scripts/config --disable MODULE_SIG_ALL
+        scripts/config --disable MODULE_SIG_FORCE
 
-        # KernelSU
-        scripts/config --file out/.config --enable KSU
-        scripts/config --file out/.config \
-          --set-str KSU_GIT_VERSION "github-actions"
+        scripts/config --enable KALLSYMS
+        scripts/config --enable BPF
+        scripts/config --enable BPF_SYSCALL
+        scripts/config --enable CGROUPS
 
-        # GKI compatibility essentials
-        scripts/config --file out/.config --enable BPF
-        scripts/config --file out/.config --enable BPF_SYSCALL
-        scripts/config --file out/.config --enable IKHEADERS
-        scripts/config --file out/.config --enable MODULES
+        make olddefconfig
 
-        # Disable known vendor-problematic features
-        scripts/config --file out/.config --disable SENSORHUB
-        scripts/config --file out/.config --disable INPUT_BOOSTER
-        scripts/config --file out/.config --disable EMS
-        scripts/config --file out/.config --disable EXYNOS_BTS
-        scripts/config --file out/.config --disable SEC_DEBUG
-
-        make O=out olddefconfig
-
-    - name: Build Kernel
+    - name: Build kernel
       run: |
         cd kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        make O=out -j$(nproc)
+        make -j$(nproc)
 
-        test -f out/arch/arm64/boot/Image
+    - name: Package AnyKernel3
+      run: |
+        cd kernel
+        wget -q https://github.com/osm0sis/AnyKernel3/archive/master.zip
+        unzip -q master.zip
+        mv AnyKernel3-master anykernel
 
-    - name: Upload Kernel Image
+        cp arch/arm64/boot/Image anykernel/
+
+        cat > anykernel/anykernel.sh << 'EOF'
+        #!/system/bin/sh
+        properties() {
+          kernel.string=Exynos850-KernelSU
+          do.devicecheck=1
+          do.systemless=1
+          device.name1=a135f
+        }
+        block=/dev/block/by-name/boot
+        is_slot_device=0
+        . tools/ak3-core.sh
+        dump_boot
+        write_boot
+        EOF
+
+        chmod +x anykernel/anykernel.sh
+        cd anykernel
+        zip -r9 ../Exynos850-KernelSU.zip .
+
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Image
-        path: kernel/out/arch/arm64/boot/Image
+        name: kernel
+        path: |
+          kernel/arch/arm64/boot/Image
+          kernel/Exynos850-KernelSU.zip
