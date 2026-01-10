@@ -1,4 +1,4 @@
-name: Build Kernel - Complete Fixes v15
+name: Build Kernel - Complete Fixes v16
 on:
   workflow_dispatch:
 jobs:
@@ -261,10 +261,13 @@ jobs:
           echo '#ifndef exynos_tmu_add_notifier\nint exynos_tmu_add_notifier(struct notifier_block *n) { return 0; }\n#endif' >> drivers/thermal/cpu_cooling.c 2>/dev/null || true
         fi
 
-        # NEW FIX: Clock dummy conflict - comment out conflicting function
+        # NEW FIX: Clock dummy conflict - rename the function to avoid multiple definition
         echo "Fixing gpex_clock_dummy.c multiple definition..."
-        sed -i '/^int __clk_is_enabled/,/^}/s/^/\/\//' drivers/gpu/arm/bv_r38p1/../exynos/frontend/dummy/gpex_clock_dummy.c 2>/dev/null || true
-        sed -i '/EXPORT_SYMBOL(__clk_is_enabled)/s/^/\/\//' drivers/gpu/arm/bv_r38p1/../exynos/frontend/dummy/gpex_clock_dummy.c 2>/dev/null || true
+        DUMMY_FILE="drivers/gpu/arm/bv_r38p1/exynos/frontend/dummy/gpex_clock_dummy.c"
+        if [ -f "$DUMMY_FILE" ]; then
+          sed -i 's/\b__clk_is_enabled\b/dummy_clk_is_enabled/g' "$DUMMY_FILE" 2>/dev/null || true
+          sed -i 's/EXPORT_SYMBOL(__clk_is_enabled)/EXPORT_SYMBOL(dummy_clk_is_enabled)/g' "$DUMMY_FILE" 2>/dev/null || true
+        fi
 
         echo "✅ All fixes applied"
     - name: Add KernelSU
@@ -429,8 +432,9 @@ jobs:
             # NEW: Emergency fix for clock dummy if error
             if grep -q "__clk_is_enabled" build_single.log 2>/dev/null || grep -q "gpex_clock_dummy" build_single.log 2>/dev/null; then
               echo "Applying emergency clock dummy fix..."
-              sed -i '/int __clk_is_enabled/,/^}/s/^/\/\//' drivers/gpu/arm/bv_r38p1/../exynos/frontend/dummy/gpex_clock_dummy.c 2>/dev/null || true
-              sed -i '/EXPORT_SYMBOL(__clk_is_enabled)/s/^/\/\//' drivers/gpu/arm/bv_r38p1/../exynos/frontend/dummy/gpex_clock_dummy.c 2>/dev/null || true
+              DUMMY_FILE="drivers/gpu/arm/bv_r38p1/exynos/frontend/dummy/gpex_clock_dummy.c"
+              sed -i 's/\b__clk_is_enabled\b/dummy_clk_is_enabled/g' "$DUMMY_FILE" 2>/dev/null || true
+              sed -i 's/EXPORT_SYMBOL(__clk_is_enabled)/EXPORT_SYMBOL(dummy_clk_is_enabled)/g' "$DUMMY_FILE" 2>/dev/null || true
             fi
             
             # Try one more build attempt
