@@ -1,225 +1,89 @@
-name: Build Kernel - Complete Fixes v20
+name: Build Exynos850 GKI-Compatible Kernel v17
+
 on:
-  workflow_dispatch:  # This enables the manual "Run workflow" button in GitHub Actions
-  push:               # Optional: also runs on push (useful for testing)
-    branches:
-      - main
+  workflow_dispatch:
+
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
-    steps:
-    - name: Checkout Repository (ensures workflow file is present)
-      uses: actions/checkout@v4
+    timeout-minutes: 120
 
+    steps:
     - name: Setup Environment
       run: |
         sudo apt update
-        sudo apt install -y build-essential bc bison flex libssl-dev libelf-dev git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu python3 ccache
-        sudo ln -s /usr/bin/ccache /usr/local/bin/ccache || true
+        sudo apt install -y \
+          build-essential bc bison flex libssl-dev libelf-dev \
+          git wget gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+          python3 ccache
 
-    - name: Get Kernel Source
+    - name: Clone Kernel Source
       run: |
-        rm -rf kernel
-        git clone https://github.com/samsungexynos850/atlas kernel --depth=1
+        git clone https://github.com/samsungexynos850/atlas kernel
+        cd kernel
+        git submodule update --init --recursive
 
-    - name: Apply Comprehensive Fixes
+    - name: Apply Minimal Required Patches
       run: |
         cd kernel
-        
-        echo "=== Applying all necessary fixes ==="
-        
-        # Remove sensorhub
-        rm -rf drivers/sensorhub 2>/dev/null || true
-        sed -i '/sensorhub/d' drivers/Kconfig 2>/dev/null || true
-        sed -i '/sensorhub/d' drivers/Makefile 2>/dev/null || true
-        
-        # Critical fix 1: secdbg_exin_get_unfz - make it return empty string for panic()
-        echo "Fixing secdbg_exin_get_unfz macro..."
-        if grep -q "secdbg_exin_get_unfz" include/linux/sec_debug.h; then
-          sed -i 's|#define secdbg_exin_get_unfz.*|#define secdbg_exin_get_unfz(a) ""|' include/linux/sec_debug.h
-        fi
-        
-        # Critical fix 2: need_memory_boosting - provide proper inline stub
-        echo "Fixing need_memory_boosting inline stub..."
-        sed -i '/need_memory_boosting/d' include/linux/mm.h 2>/dev/null || true
-        sed -i '/need_memory_boosting/d' mm/vmscan.c 2>/dev/null || true
-        
-        cat << 'EOF' >> include/linux/mm.h
 
-#ifndef need_memory_boosting
-static inline bool need_memory_boosting(void) { return false; }
-#endif
-EOF
-        
-        # bpf_trace inline issue
-        sed -i 's/static inline __printf(1, 0)/static __noinline __printf(1, 0)/' kernel/trace/bpf_trace.c 2>/dev/null || true
-        
-        # EMS conflicts (signature mismatch)
-        if [ -f "include/linux/ems.h" ]; then
-          sed -i 's/lb_cfs_tasks(struct rq \*rq, struct sched_entity \*se)/lb_cfs_tasks(struct rq *rq, int sse)/' include/linux/ems.h 2>/dev/null || true
-        fi
-        if [ -f "kernel/sched/ems/load_balance.c" ]; then
-          sed -i 's/struct list_head \*lb_cfs_tasks(struct rq \*rq, struct sched_entity \*se)/struct list_head *lb_cfs_tasks(struct rq *rq, int sse)/' kernel/sched/ems/load_balance.c 2>/dev/null || true
-        fi
-        
-        # GPU clock dummy (prevent multiple definition)
-        echo "Fixing GPU clock dummy conflicts..."
-        for DUMMY_FILE in \
-          "drivers/gpu/arm/bv_r38p1/exynos/frontend/dummy/gpex_clock_dummy.c" \
-          "drivers/gpu/arm/exynos/frontend/dummy/gpex_clock_dummy.c" \
-          "drivers/gpu/arm/midgard/frontend/dummy/gpex_clock_dummy.c" \
-          "drivers/gpu/drm/samsung/dpu/gpex_clock_dummy.c"; do
-          if [ -f "$DUMMY_FILE" ]; then
-            sed -i 's/\b__clk_is_enabled\b/gpex_dummy_clk_is_enabled/g' "$DUMMY_FILE"
-            sed -i 's/\bclk_is_enabled\b/gpex_dummy_clk_is_enabled/g' "$DUMMY_FILE"
-            sed -i 's/EXPORT_SYMBOL.*/\/\/ &/' "$DUMMY_FILE"
-            echo "Patched $DUMMY_FILE"
-          fi
-        done
-        
-        # Turn off -Werror everywhere
-        find . -type f -name "Makefile*" -exec sed -i 's/-Werror=/-Wno-error=/g; s/-Werror\b//g' {} \; 2>/dev/null || true
-        
-        echo "✅ All fixes applied"
+        # bpf_trace fix (known GCC issue)
+        sed -i 's/static inline __printf/static __printf/' \
+          kernel/trace/bpf_trace.c || true
+
+        # sec_debug stub
+        sed -i 's/^#define secdbg_exin_get_unfz.*/#define secdbg_exin_get_unfz(a) ("")/' \
+          include/linux/sec_debug.h || true
 
     - name: Add KernelSU
       run: |
         cd kernel
-        rm -rf drivers/kernelsu
-        git clone https://github.com/tiann/KernelSU ksu_tmp --depth=1
-        mv ksu_tmp/kernel drivers/kernelsu
+        git clone https://github.com/tiann/KernelSU drivers/kernelsu
         echo 'source "drivers/kernelsu/Kconfig"' >> drivers/Kconfig
         echo 'obj-y += kernelsu/' >> drivers/Makefile
-        rm -rf ksu_tmp
 
-    - name: Configure Kernel
+    - name: Configure Kernel (Vendor Base)
       run: |
         cd kernel
-        rm -rf out
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        
+
         mkdir -p out
-        make O=out ARCH=arm64 gki_defconfig
-        
+        make O=out exynos850-atlas_defconfig
+
         chmod +x scripts/config
-        
-        ./scripts/config --file out/.config --enable KSU
-        ./scripts/config --file out/.config --set-str KSU_GIT_VERSION "github-action-build"
-        ./scripts/config --file out/.config --disable MODULE_SIG
-        ./scripts/config --file out/.config --disable MODULE_SIG_ALL
-        ./scripts/config --file out/.config --disable MODULE_SIG_FORCE
-        
-        # Disable all proprietary/Samsung stuff that causes issues
-        ./scripts/config --file out/.config --disable MALI_MIDGARD
-        ./scripts/config --file out/.config --disable MALI_BIFROST
-        ./scripts/config --file out/.config --disable MALI_VALHALL
-        ./scripts/config --file out/.config --disable ARM_MALI_BIFROST
-        ./scripts/config --file out/.config --disable MALI_EXYNOS
-        ./scripts/config --file out/.config --disable MALI_PLATFORM_EXYNOS
-        ./scripts/config --file out/.config --disable EXYNOS_MALI
-        ./scripts/config --file out/.config --disable GPU_EXYNOS
-        ./scripts/config --file out/.config --disable GPEX
-        ./scripts/config --file out/.config --disable GPEX_CLOCK
-        ./scripts/config --file out/.config --disable DRM_SAMSUNG_DPU
-        
-        ./scripts/config --file out/.config --disable SEC_DEBUG
-        ./scripts/config --file out/.config --disable SEC_DEBUG_EXTRA_INFO
-        ./scripts/config --file out/.config --disable EXYNOS_BTS
-        ./scripts/config --file out/.config --disable INPUT_BOOSTER
-        ./scripts/config --file out/.config --disable EMS
-        ./scripts/config --file out/.config --disable EMSTUNE
-        ./scripts/config --file out/.config --disable SCHED_EMS
-        ./scripts/config --file out/.config --disable BLUETOOTH
-        ./scripts/config --file out/.config --disable SCSI_UFSHCD
-        ./scripts/config --file out/.config --disable XDP_SOCKETS
-        ./scripts/config --file out/.config --disable CPU_THERMAL
-        ./scripts/config --file out/.config --disable EXYNOS_THERMAL
-        
-        make O=out ARCH=arm64 olddefconfig
+
+        # KernelSU
+        scripts/config --file out/.config --enable KSU
+        scripts/config --file out/.config \
+          --set-str KSU_GIT_VERSION "github-actions"
+
+        # GKI compatibility essentials
+        scripts/config --file out/.config --enable BPF
+        scripts/config --file out/.config --enable BPF_SYSCALL
+        scripts/config --file out/.config --enable IKHEADERS
+        scripts/config --file out/.config --enable MODULES
+
+        # Disable known vendor-problematic features
+        scripts/config --file out/.config --disable SENSORHUB
+        scripts/config --file out/.config --disable INPUT_BOOSTER
+        scripts/config --file out/.config --disable EMS
+        scripts/config --file out/.config --disable EXYNOS_BTS
+        scripts/config --file out/.config --disable SEC_DEBUG
+
+        make O=out olddefconfig
 
     - name: Build Kernel
       run: |
         cd kernel
         export ARCH=arm64
         export CROSS_COMPILE=aarch64-linux-gnu-
-        export KCFLAGS="-w -Wno-error -Wno-error=attribute-alias -Wno-error=implicit-function-declaration -Wno-error=incompatible-pointer-types"
-        
-        echo "🚀 Starting kernel build..."
-        
-        if make O=out ARCH=arm64 -j$(nproc) 2>&1 | tee build.log; then
-          echo "✅ Parallel build successful!"
-        else
-          echo "⚠️ Parallel build failed, trying single-core..."
-          make O=out ARCH=arm64 clean
-          if make O=out ARCH=arm64 -j1 2>&1 | tee build_single.log; then
-            echo "✅ Single-core build successful!"
-          else
-            echo "❌ Build failed completely"
-            exit 1
-          fi
-        fi
-        
-        if [ -f "out/arch/arm64/boot/Image" ]; then
-          echo "🎉🎉🎉 KERNEL BUILD SUCCESSFUL! 🎉🎉🎉"
-          ls -lh out/arch/arm64/boot/Image
-        else
-          echo "❌ No Image found!"
-          find out -name "Image*" | head -10
-          exit 1
-        fi
+        make O=out -j$(nproc)
 
-    - name: Create AnyKernel3 Package
-      if: success()
-      run: |
-        cd kernel
-        wget -q https://github.com/osm0sis/AnyKernel3/archive/master.zip -O anykernel.zip
-        unzip -q anykernel.zip -d anykernel_temp
-        mv anykernel_temp/AnyKernel3-master anykernel
-        rm -rf anykernel_temp anykernel.zip
-        
-        cp out/arch/arm64/boot/Image anykernel/
-        
-        cat > anykernel/anykernel.sh << 'EOF'
-        #!/system/bin/sh
-        properties() {
-        kernel.string=Atlas-GKI-KernelSU
-        do.devicecheck=1
-        do.modules=0
-        do.systemless=1
-        do.cleanup=1
-        do.cleanuponabort=0
-        device.name1=a13
-        device.name2=a135f
-        device.name3=exynos850
-        }
-        block=/dev/block/by-name/boot;
-        is_slot_device=0;
-        ramdisk_compression=auto;
-        . tools/ak3-core.sh;
-        dump_boot;
-        write_boot;
-        EOF
-        
-        chmod +x anykernel/anykernel.sh
-        cd anykernel
-        zip -r9 ../Atlas-GKI-KernelSU-$(date +%Y%m%d).zip .
+        test -f out/arch/arm64/boot/Image
 
-    - name: Upload Artifacts
+    - name: Upload Kernel Image
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-build
-        path: |
-          kernel/out/arch/arm64/boot/Image
-          kernel/Atlas-GKI-KernelSU-*.zip
-
-    - name: Upload Build Logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: build-logs
-        path: |
-          kernel/build.log
-          kernel/build_single.log
-          kernel/out/.config
+        name: Image
+        path: kernel/out/arch/arm64/boot/Image
